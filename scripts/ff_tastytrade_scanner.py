@@ -53,6 +53,22 @@ def dte(exp: date, ref: Optional[date] = None) -> int:
     return (exp - ref).days
 
 def parse_pairs(pairs: List[str]) -> List[Tuple[int, int]]:
+    """
+    Parse DTE pair strings into tuples of integers.
+
+    Args:
+        pairs: List of DTE pair strings (e.g., ['30-60', '30-90', '60-90'])
+
+    Returns:
+        List of (front_dte, back_dte) tuples
+
+    Raises:
+        ValueError: If pair is not ascending (e.g., '60-30') or invalid format
+
+    Example:
+        >>> parse_pairs(['30-60', '60-90'])
+        [(30, 60), (60, 90)]
+    """
     out: List[Tuple[int, int]] = []
     for p in pairs:
         a, b = p.split("-")
@@ -149,8 +165,26 @@ async def snapshot_greeks(session: Session, streamer_symbols: List[str], timeout
 
 def forward_iv(iv_front: float, iv_back: float, dte_front: int, dte_back: int) -> Optional[float]:
     """
-    Compute forward IV between two expirations using annualized vols.
-    T = DTE/365.  IVs are decimals (e.g., 0.25 for 25%).
+    Compute forward implied volatility between two expirations using variance decomposition.
+
+    Uses the formula: σ_fwd = sqrt((T2·σ2² - T1·σ1²) / (T2 - T1))
+    where T = DTE/365 (annualized time).
+
+    Args:
+        iv_front: Front expiration IV (decimal, e.g., 0.25 = 25%)
+        iv_back: Back expiration IV (decimal, e.g., 0.25 = 25%)
+        dte_front: Days to front expiration
+        dte_back: Days to back expiration
+
+    Returns:
+        Forward IV as decimal (e.g., 0.25 = 25%), or None if calculation invalid
+
+    Raises:
+        None (returns None on any error)
+
+    Example:
+        >>> forward_iv(0.30, 0.25, 30, 60)
+        0.2041...  # Forward IV for 30-60 DTE window
     """
     if iv_front <= 0 or iv_back <= 0 or dte_back <= dte_front:
         return None
@@ -230,17 +264,34 @@ async def snapshot_greeks_for_range(
     timeout_s: float = 5.0
 ) -> Dict[str, Tuple[float, float]]:
     """
-    Fetch Greeks for a range of strikes around spot price.
+    Fetch Greeks (IV and delta) for a range of strikes around current spot price.
+
+    Used for delta-based strike selection in double calendar spreads. Fetches
+    Greeks for both calls and puts within ±range_pct of spot price.
 
     Args:
-        session: tastytrade Session
-        expiration_obj: NestedOptionChain expiration object
+        session: Active tastytrade session
+        expiration_obj: NestedOptionChain expiration object containing strikes
         spot: Current underlying spot price
         range_pct: Percentage range around spot (default 0.25 = ±25%)
-        timeout_s: Timeout for Greeks snapshot
+                   Example: spot=100, range_pct=0.25 → fetch strikes 75-125
+        timeout_s: Timeout for Greeks snapshot in seconds (default 5.0)
 
     Returns:
-        Dict mapping streamer_symbol → (iv, delta) for all strikes in range
+        Dict mapping streamer_symbol → (iv, delta) tuple
+        - iv: Implied volatility (decimal, e.g., 0.25 = 25%)
+        - delta: Option delta (decimal, e.g., 0.35 = +35Δ call)
+        Returns empty dict {} if no strikes in range
+
+    Raises:
+        None (returns partial results on timeout, empty dict if no strikes found)
+
+    Example:
+        >>> greeks = await snapshot_greeks_for_range(session, exp_obj, spot=100.0)
+        >>> len(greeks)  # Number of option contracts with Greeks data
+        42
+        >>> greeks['.SPY251121C100']
+        (0.25, 0.50)  # (IV=25%, delta=50Δ)
     """
     lower_bound = spot * (1 - range_pct)
     upper_bound = spot * (1 + range_pct)
@@ -266,19 +317,37 @@ async def get_double_calendar_strikes(
     timeout_s: float = 5.0
 ) -> Dict[str, Optional[DeltaStrikeChoice]]:
     """
-    Get both ±35Δ strikes for a double calendar spread.
+    Find both call and put strikes matching target deltas for double calendar spreads.
+
+    Double calendar structure: Sell front ±35Δ call/put, buy back ±35Δ call/put.
+    This function finds strikes closest to the target deltas within tolerance.
 
     Args:
-        session: tastytrade Session
-        expiration_obj: NestedOptionChain expiration object
+        session: Active tastytrade session
+        expiration_obj: NestedOptionChain expiration object containing strikes
         spot: Current underlying spot price
         call_target_delta: Target delta for call leg (default 0.35 = +35Δ)
         put_target_delta: Target delta for put leg (default -0.35 = -35Δ)
-        delta_tolerance: Maximum deviation from target delta (default 0.05 = ±5Δ)
-        timeout_s: Timeout for Greeks snapshot
+        delta_tolerance: Max deviation from target (default 0.05 = ±5Δ)
+                        Example: 0.35 target with 0.05 tolerance → accept 0.30-0.40
+        timeout_s: Timeout for Greeks snapshot in seconds (default 5.0)
 
     Returns:
-        Dict with keys "call_35delta" and "put_35delta", values are DeltaStrikeChoice or None
+        Dict with keys:
+        - "call_35delta": DeltaStrikeChoice for call leg, or None if not found
+        - "put_35delta": DeltaStrikeChoice for put leg, or None if not found
+
+    Raises:
+        None (returns None values if strikes not found within tolerance)
+
+    Example:
+        >>> strikes = await get_double_calendar_strikes(session, exp_obj, spot=100.0)
+        >>> strikes['call_35delta']
+        DeltaStrikeChoice(strike=105.0, streamer_symbol='.SPY251121C105',
+                         actual_delta=0.34, iv=0.25)
+        >>> strikes['put_35delta']
+        DeltaStrikeChoice(strike=95.0, streamer_symbol='.SPY251121P95',
+                         actual_delta=-0.35, iv=0.24)
     """
     # Fetch Greeks for a wide range of strikes
     greeks_map = await snapshot_greeks_for_range(session, expiration_obj, spot, timeout_s=timeout_s)
@@ -300,17 +369,30 @@ async def get_double_calendar_strikes(
 
 def fetch_market_metrics(session: Session, symbols: List[str]) -> Dict[str, any]:
     """
-    Batch fetch earnings and liquidity data for all symbols.
+    Batch fetch earnings dates, liquidity ratings, and X-earn IV data for all symbols.
+
+    Calls tastytrade's get_market_metrics() API to retrieve:
+    - Earnings dates (earnings.expected_report_date)
+    - Liquidity ratings (0-5 scale)
+    - X-earn IV by expiration (option_expiration_implied_volatilities)
 
     Args:
-        session: Active tastytrade session
-        symbols: List of ticker symbols (e.g., ['SPY', 'QQQ'])
+        session: Active tastytrade session (must be authenticated)
+        symbols: List of ticker symbols (e.g., ['SPY', 'QQQ', 'AAPL'])
 
     Returns:
-        Dict mapping symbol → MarketMetricInfo (or None if fetch fails)
+        Dict mapping symbol → MarketMetricInfo object
+        Returns empty dict {} on API failure (never crashes)
 
-    Note:
-        Returns empty dict on failure, logs error. Never crashes.
+    Raises:
+        None (logs error to stderr and returns empty dict on failure)
+
+    Example:
+        >>> metrics = fetch_market_metrics(session, ['SPY', 'QQQ'])
+        >>> metrics['SPY'].liquidity_rating
+        5
+        >>> metrics['SPY'].earnings.expected_report_date
+        date(2025, 10, 25)
     """
     try:
         metrics = get_market_metrics(session, symbols)
@@ -329,17 +411,34 @@ def check_earnings_conflict(
     today: date
 ) -> Tuple[bool, Optional[str]]:
     """
-    Check if earnings date falls between today and back expiry (inclusive).
+    Check if earnings announcement falls between today and back expiration (inclusive).
+
+    Calendar spreads should avoid holding through earnings announcements to prevent
+    unexpected IV crush and P&L volatility. This function checks if the expected
+    earnings date falls within the trade window.
 
     Args:
-        symbol: Ticker symbol
-        metrics: Dict from fetch_market_metrics()
-        back_expiry: Back leg expiration date
-        today: Current date (NY timezone)
+        symbol: Ticker symbol (e.g., 'AAPL')
+        metrics: Market metrics dict from fetch_market_metrics()
+        back_expiry: Back leg expiration date (end of trade window)
+        today: Current date in NY timezone (start of trade window)
 
     Returns:
-        (passes, reason): (True, None) if no conflict or data unavailable,
-                          (False, reason_str) if earnings conflict detected
+        Tuple of (passes_filter, reason_string):
+        - (True, None): No conflict detected OR earnings data unavailable
+        - (False, reason): Earnings conflict detected with explanation
+
+    Raises:
+        None (gracefully handles missing data with warnings to stderr)
+
+    Example:
+        >>> # Earnings on 2025-11-01, back expiry 2025-11-15
+        >>> check_earnings_conflict('AAPL', metrics, date(2025, 11, 15), date(2025, 10, 20))
+        (False, 'Earnings on 2025-11-01 conflicts with back expiry 2025-11-15')
+
+        >>> # Earnings on 2025-12-01, back expiry 2025-11-15 (no conflict)
+        >>> check_earnings_conflict('AAPL', metrics, date(2025, 11, 15), date(2025, 10, 20))
+        (True, None)
     """
     if symbol not in metrics:
         # No metrics data - log warning but allow through
@@ -373,16 +472,35 @@ def check_liquidity(
     min_rating: int
 ) -> Tuple[bool, Optional[str]]:
     """
-    Check if liquidity rating meets minimum threshold.
+    Check if symbol's liquidity rating meets minimum threshold.
+
+    Liquidity ratings from tastytrade are on a 0-5 scale:
+    - 5: Extremely liquid (tight bid-ask, deep book)
+    - 4: Very liquid
+    - 3: Moderately liquid (typical minimum for calendar spreads)
+    - 2: Low liquidity (wide spreads possible)
+    - 1: Very low liquidity
+    - 0: Illiquid (avoid trading)
 
     Args:
-        symbol: Ticker symbol
-        metrics: Dict from fetch_market_metrics()
-        min_rating: Minimum liquidity rating (0-5 scale)
+        symbol: Ticker symbol (e.g., 'SPY')
+        metrics: Market metrics dict from fetch_market_metrics()
+        min_rating: Minimum acceptable liquidity rating (0-5, default 3)
 
     Returns:
-        (passes, reason): (True, None) if passes or data unavailable,
-                          (False, reason_str) if below threshold
+        Tuple of (passes_filter, reason_string):
+        - (True, None): Meets threshold OR liquidity data unavailable
+        - (False, reason): Below threshold with explanation
+
+    Raises:
+        None (gracefully handles missing/invalid data with warnings to stderr)
+
+    Example:
+        >>> check_liquidity('SPY', metrics, min_rating=3)
+        (True, None)  # SPY has rating 5
+
+        >>> check_liquidity('ILLIQUID', metrics, min_rating=3)
+        (False, 'Liquidity rating 2 < 3')
     """
     if symbol not in metrics:
         print(f"[WARN] {symbol}: Market metrics unavailable, skipping liquidity check", file=sys.stderr)
@@ -465,6 +583,65 @@ async def scan(session: Session, tickers: List[str], pairs: List[Tuple[int, int]
                use_xearn_iv: bool = True, force_greeks_iv: bool = False,
                show_all_scans: bool = False, structure: str = "both",
                delta_tolerance: float = 0.05) -> List[dict]:
+    """
+    Main scanner function: Find calendar spread opportunities with high forward factors.
+
+    Scans symbols for calendar spread setups where front-month IV is elevated relative
+    to forward IV. Supports both ATM call calendars and double calendars (±35Δ).
+
+    Workflow:
+    1. Fetch market metrics (earnings, liquidity, X-earn IV) for all symbols
+    2. For each symbol:
+       - Get spot price and option chain
+       - Apply earnings and liquidity filters
+       - Find expirations matching target DTEs
+       - Fetch Greeks (IV, delta) for relevant strikes
+       - Calculate forward IV and FF ratio
+       - Output rows for structures meeting FF threshold
+
+    Args:
+        session: Active tastytrade session (must be authenticated)
+        tickers: List of ticker symbols to scan (e.g., ['SPY', 'QQQ', 'AAPL'])
+        pairs: List of (front_dte, back_dte) tuples (e.g., [(30, 60), (60, 90)])
+        min_ff: Minimum FF ratio threshold (e.g., 0.20 or 0.23)
+        dte_tolerance: Max deviation from target DTE in days (default 5)
+        timeout_s: Greeks streaming timeout in seconds (default 3.0)
+        skip_earnings: Filter out positions with earnings conflicts (default True)
+        min_liquidity_rating: Minimum liquidity rating 0-5 (default 3)
+        skip_liquidity_check: Disable liquidity filtering (default False)
+        show_earnings_conflicts: Include filtered positions in output (default False)
+        use_xearn_iv: Try X-earn IV before falling back to Greeks IV (default True)
+        force_greeks_iv: Always use Greeks IV, skip X-earn IV (default False)
+        show_all_scans: Show all results regardless of FF threshold (default False)
+        structure: Calendar type: "atm-call", "double", or "both" (default "both")
+        delta_tolerance: Max delta deviation for double calendars (default 0.05 = ±5Δ)
+
+    Returns:
+        List of dict rows with 25-column unified CSV schema:
+        - timestamp, symbol, structure, spot_price
+        - front_dte, back_dte, front_expiry, back_expiry
+        - atm_strike, call_strike, put_strike, call_delta, put_delta
+        - front_iv, back_iv, fwd_iv
+        - ff, call_ff, put_ff, combined_ff
+        - earnings_date, earnings_conflict
+        - liquidity_rating, liquidity_value
+        - iv_source_front, iv_source_back
+
+        Sorted by combined_ff descending, then symbol ascending.
+
+    Raises:
+        None (logs warnings for failures, continues processing remaining symbols)
+
+    Example:
+        >>> rows = await scan(
+        ...     session, ['SPY', 'QQQ'], [(30, 60)],
+        ...     min_ff=0.23, dte_tolerance=5, timeout_s=3.0
+        ... )
+        >>> rows[0]['symbol']
+        'SPY'
+        >>> rows[0]['combined_ff']
+        0.285  # 28.5% FF ratio
+    """
     rows: List[dict] = []
     filtered_rows: List[dict] = []  # For --show-earnings-conflicts
     today = ny_today()
@@ -785,7 +962,26 @@ async def scan(session: Session, tickers: List[str], pairs: List[Tuple[int, int]
     return rows
 
 def read_list_arg(values: List[str]) -> List[str]:
-    # Allow comma-separated or repeated flags
+    """
+    Parse command-line list arguments supporting both space and comma separation.
+
+    Handles argparse nargs="+" arguments that can be provided as:
+    - Space-separated: --tickers SPY QQQ AAPL
+    - Comma-separated: --tickers SPY,QQQ,AAPL
+    - Mixed: --tickers SPY,QQQ AAPL
+
+    Args:
+        values: List of strings from argparse (e.g., ['SPY,QQQ', 'AAPL'])
+
+    Returns:
+        List of uppercase, stripped strings (e.g., ['SPY', 'QQQ', 'AAPL'])
+
+    Example:
+        >>> read_list_arg(['SPY,QQQ', 'AAPL'])
+        ['SPY', 'QQQ', 'AAPL']
+        >>> read_list_arg(['spy', 'qqq'])
+        ['SPY', 'QQQ']
+    """
     out: List[str] = []
     for v in values:
         out.extend([x for x in v.split(",") if x])

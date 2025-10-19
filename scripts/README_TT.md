@@ -37,9 +37,9 @@ The FF Scanner is a production-ready CLI tool that scans liquid options to ident
 **v2.0 Enhancements:**
 - ✅ **Earnings Filtering**: Automatically skip positions with earnings between today and back expiry
 - ✅ **Liquidity Screening**: Filter by tastytrade liquidity rating (0-5 scale)
-- ✅ **X-earn IV Support**: Use earnings-removed IV when available, fall back to Greeks IV
-- ✅ **Double Calendar Scanning**: Find ±35Δ strikes for call and put calendars
-- ✅ **Enhanced CSV Output**: 25-column schema with timestamps, deltas, structure types, and IV sources
+- ✅ **X-earn IV Support**: Use earnings-removed IV when available, fall back to Greeks IV (works for both ATM and double calendars)
+- ✅ **Double Calendar Scanning**: Find ±35Δ strikes for call and put calendars (requires BOTH legs)
+- ✅ **Enhanced CSV Output**: 28-column schema with call/put-specific IVs, timestamps, deltas, and IV sources
 - ✅ **Flexible Structure Selection**: Scan ATM-only, double-only, or both simultaneously
 
 ---
@@ -276,7 +276,9 @@ python scripts/ff_tastytrade_scanner.py \
 
 **How It Works:**
 
-The scanner fetches earnings data from tastytrade's Market Metrics API and checks if the expected earnings report date falls between today and the back leg expiration (inclusive). If a conflict is detected, the position is excluded from results.
+The scanner fetches earnings data from tastytrade's Market Metrics API and checks if the expected earnings report date falls between **today and the back leg expiration (inclusive)**. If a conflict is detected, the position is excluded from results.
+
+**Earnings Filter Period:** Today through back expiration date (inclusive). Example: If today is Oct 19 and back expiry is Nov 21, any earnings date from Oct 19 to Nov 21 triggers a conflict.
 
 **Why This Matters:**
 
@@ -416,11 +418,15 @@ When X-earn IV is unavailable, scanner logs informational messages:
 
 **What are Double Calendars?**
 
-A double calendar spread consists of:
+A double calendar spread consists of TWO simultaneous calendar spreads:
 - One **+35Δ call calendar** (sell front 35-delta call, buy back 35-delta call)
 - One **-35Δ put calendar** (sell front 35-delta put, buy back 35-delta put)
 
 This structure has **higher win rates** than ATM call calendars according to the original research.
+
+**CRITICAL: Both Legs Required**
+
+The scanner **requires BOTH call and put legs** to output a double calendar. If only one leg meets delta tolerance, the symbol is skipped for double calendar structure (but may still appear as ATM calendar if `--structure both`).
 
 **How It Works:**
 
@@ -428,8 +434,9 @@ This structure has **higher win rates** than ATM call calendars according to the
 2. For each expiration, finds strikes closest to:
    - Call: +0.35 delta (±5Δ tolerance by default)
    - Put: -0.35 delta (±5Δ tolerance by default)
-3. Calculates Forward Factor for both call and put calendars independently
-4. Outputs separate rows for `double-call` and `double-put` structures
+3. **Verifies BOTH legs exist** - if not, skips this symbol for double calendar
+4. Calculates Forward Factor for both call and put calendars independently
+5. Outputs **ONE row** per double calendar with both strikes and both FFs populated
 
 **Delta Tolerance:**
 
@@ -446,34 +453,36 @@ python scripts/ff_tastytrade_scanner.py --tickers SPY --pairs 60-90 --structure 
 **Combined FF Calculation:**
 
 For double calendars:
-- `combined_ff = call_ff` (for `double-call` structure)
-- `combined_ff = put_ff` (for `double-put` structure)
+- `call_ff` = Forward Factor for call leg (from +35Δ strike IVs)
+- `put_ff` = Forward Factor for put leg (from -35Δ strike IVs)
+- `combined_ff` = (call_ff + put_ff) / 2 (average of both legs)
 
 For ATM calendars:
-- `combined_ff = ff` (single FF value)
+- `call_ff` = Forward Factor from call at ATM strike
+- `put_ff` = Forward Factor from put at ATM strike
+- `combined_ff` = (call_ff + put_ff) / 2 (average of both legs)
 
 The `combined_ff` column is used for sorting all results (highest first).
 
 **Structure Types in CSV:**
 
-- `atm-call`: ATM call calendar (same strike, sell front call / buy back call)
-- `double-call`: +35Δ call calendar (sell front 35Δ call / buy back 35Δ call)
-- `double-put`: -35Δ put calendar (sell front 35Δ put / buy back 35Δ put)
+- `atm-call`: ATM call calendar (same strike for call and put, IVs from ATM strike)
+- `double`: Double calendar (BOTH +35Δ call and -35Δ put calendars, different strikes)
 
 **Example Output:**
 
 ```csv
-timestamp,symbol,structure,spot_price,front_dte,back_dte,...,call_strike,put_strike,call_delta,put_delta,call_ff,put_ff,combined_ff
-2025-10-19T14:30:00.123456+00:00,SPY,double-call,580.50,30,60,...,595.00,,0.3498,,0.2547,,0.2547
-2025-10-19T14:30:00.123456+00:00,SPY,double-put,580.50,30,60,...,,565.00,,-0.3512,,0.2398,0.2398
-2025-10-19T14:30:00.123456+00:00,SPY,atm-call,580.50,30,60,...,580.00,,,,,0.2312,0.2312
+timestamp,symbol,structure,call_ff,put_ff,combined_ff,spot_price,front_dte,back_dte,...,call_strike,put_strike,call_delta,put_delta
+2025-10-19T14:30:00+00:00,SPY,double,0.2547,0.2398,0.2473,580.50,30,60,...,595.00,565.00,0.3498,-0.3512
+2025-10-19T14:30:00+00:00,SPY,atm-call,0.2312,0.2311,0.2312,580.50,30,60,...,,,,,
 ```
+
+Note: The double calendar is **ONE row** with both `call_strike` and `put_strike` populated.
 
 **When Delta Strikes Are Unavailable:**
 
-If scanner cannot find a strike within tolerance:
-- Call calendar: Skipped (no row output)
-- Put calendar: Skipped (no row output)
+If scanner cannot find strikes within tolerance for BOTH call and put:
+- Double calendar: Skipped entirely (no row output)
 - ATM calendar: Still scanned (if `--structure both` or `--structure atm-call`)
 
 **Performance Note:**
@@ -541,61 +550,70 @@ For a 30-60 DTE calendar spread, the scanner will report **three different FF va
 
 ## CSV Output Schema
 
-### 25-Column Schema (v2.0)
+### 28-Column Schema (v2.0)
 
 The scanner outputs a unified CSV schema that supports both ATM and double calendar structures. Empty columns are left blank (not "N/A" or "null").
 
+**Key Design Principle:**
+- ALL IVs are stored in call-specific and put-specific columns
+- For ATM calendars: Call and put IVs are from the SAME strike (may differ slightly)
+- For double calendars: Call and put IVs are from DIFFERENT strikes (+35Δ vs -35Δ)
+- This design provides maximum transparency and consistency across structures
+
 | Column | Type | Description | ATM Calendar | Double Calendar |
 |--------|------|-------------|--------------|-----------------|
-| `timestamp` | ISO 8601 | UTC timestamp when scan was run (RFC 3339 format) | ✅ | ✅ |
+| `timestamp` | ISO 8601 | UTC timestamp when scan was run (RFC 3339: "+00:00" suffix) | ✅ | ✅ |
 | `symbol` | string | Ticker symbol (e.g., "SPY") | ✅ | ✅ |
-| `structure` | enum | `atm-call`, `double-call`, or `double-put` | ✅ | ✅ |
+| `structure` | enum | `atm-call` or `double` | ✅ | ✅ |
+| `call_ff` | float | Forward Factor for call leg | ✅ | ✅ |
+| `put_ff` | float | Forward Factor for put leg | ✅ | ✅ |
+| `combined_ff` | float | Average of call_ff and put_ff (primary sorting metric) | ✅ | ✅ |
 | `spot_price` | float | Underlying last price | ✅ | ✅ |
 | `front_dte` | int | Front leg days to expiration | ✅ | ✅ |
 | `back_dte` | int | Back leg days to expiration | ✅ | ✅ |
-| `front_expiry` | date | Front leg expiration date (ISO 8601) | ✅ | ✅ |
-| `back_expiry` | date | Back leg expiration date (ISO 8601) | ✅ | ✅ |
-| `atm_strike` | float | ATM strike price | ✅ | *(empty)* |
-| `call_strike` | float | Call strike for double calendar | *(empty)* | ✅ (call only) |
-| `put_strike` | float | Put strike for double calendar | *(empty)* | ✅ (put only) |
-| `call_delta` | float | Call delta for double calendar | *(empty)* | ✅ (call only) |
-| `put_delta` | float | Put delta for double calendar | *(empty)* | ✅ (put only) |
-| `front_iv` | float | Front leg implied volatility (decimal) | ✅ | ✅ |
-| `back_iv` | float | Back leg implied volatility (decimal) | ✅ | ✅ |
-| `fwd_iv` | float | Forward IV (computed) | ✅ | ✅ |
-| `ff` | float | Forward Factor for ATM calendar | ✅ | *(empty)* |
-| `call_ff` | float | Forward Factor for call calendar | *(empty)* | ✅ (call only) |
-| `put_ff` | float | Forward Factor for put calendar | *(empty)* | ✅ (put only) |
-| `combined_ff` | float | FF used for sorting (same as `ff` for ATM, `call_ff` or `put_ff` for double) | ✅ | ✅ |
-| `earnings_date` | date | Expected earnings report date (ISO 8601, empty if none) | ✅ | ✅ |
-| `earnings_conflict` | enum | `no` if no conflict, empty if earnings_date is empty | ✅ | ✅ |
+| `front_expiry` | date | Front leg expiration date (YYYY-MM-DD) | ✅ | ✅ |
+| `back_expiry` | date | Back leg expiration date (YYYY-MM-DD) | ✅ | ✅ |
+| `atm_strike` | float | ATM strike price (same for call and put) | ✅ | *(empty)* |
+| `call_strike` | float | +35Δ call strike for double calendar | *(empty)* | ✅ |
+| `put_strike` | float | -35Δ put strike for double calendar | *(empty)* | ✅ |
+| `call_delta` | float | Actual delta of call strike | *(empty)* | ✅ |
+| `put_delta` | float | Actual delta of put strike | *(empty)* | ✅ |
+| `call_front_iv` | float | Call IV at front expiration (decimal: 0.25 = 25%) | ✅ | ✅ |
+| `call_back_iv` | float | Call IV at back expiration | ✅ | ✅ |
+| `call_fwd_iv` | float | Forward IV for call leg (computed) | ✅ | ✅ |
+| `put_front_iv` | float | Put IV at front expiration | ✅ | ✅ |
+| `put_back_iv` | float | Put IV at back expiration | ✅ | ✅ |
+| `put_fwd_iv` | float | Forward IV for put leg (computed) | ✅ | ✅ |
+| `earnings_conflict` | enum | `yes` or `no` | ✅ | ✅ |
+| `earnings_date` | date | Expected earnings report date (YYYY-MM-DD, empty if none) | ✅ | ✅ |
 | `liquidity_rating` | int | tastytrade liquidity rating (0-5 scale) | ✅ | ✅ |
 | `liquidity_value` | float | *(reserved for future use, currently empty)* | *(empty)* | *(empty)* |
-| `iv_source_front` | enum | `xearn` or `greeks` | ✅ | ✅ |
-| `iv_source_back` | enum | `xearn` or `greeks` | ✅ | ✅ |
+| `iv_source_call_front` | enum | Call IV source for front expiration: `xearn` or `greeks` | ✅ | ✅ |
+| `iv_source_call_back` | enum | Call IV source for back expiration: `xearn` or `greeks` | ✅ | ✅ |
+| `iv_source_put_front` | enum | Put IV source for front expiration: `xearn` or `greeks` | ✅ | ✅ |
+| `iv_source_put_back` | enum | Put IV source for back expiration: `xearn` or `greeks` | ✅ | ✅ |
 
 ### Example CSV Output
 
 **ATM Call Calendar:**
 
 ```csv
-timestamp,symbol,structure,spot_price,front_dte,back_dte,front_expiry,back_expiry,atm_strike,call_strike,put_strike,call_delta,put_delta,front_iv,back_iv,fwd_iv,ff,call_ff,put_ff,combined_ff,earnings_date,earnings_conflict,liquidity_rating,liquidity_value,iv_source_front,iv_source_back
-2025-10-19T14:30:00.123456+00:00,SPY,atm-call,580.50,30,60,2025-11-18,2025-12-18,580.00,,,,,0.185432,0.172145,0.158967,0.166234,,,0.166234,,no,5,,greeks,greeks
+timestamp,symbol,structure,call_ff,put_ff,combined_ff,spot_price,front_dte,back_dte,front_expiry,back_expiry,atm_strike,call_strike,put_strike,call_delta,put_delta,call_front_iv,call_back_iv,call_fwd_iv,put_front_iv,put_back_iv,put_fwd_iv,earnings_conflict,earnings_date,liquidity_rating,liquidity_value,iv_source_call_front,iv_source_call_back,iv_source_put_front,iv_source_put_back
+2025-10-19T14:30:00+00:00,SPY,atm-call,0.166234,0.165890,0.166062,580.50,30,60,2025-11-18,2025-12-18,580.00,,,,,0.185432,0.172145,0.158967,0.185001,0.171890,0.158745,no,,5,,xearn,xearn,xearn,xearn
 ```
 
-**Double Call Calendar:**
+**Double Calendar:**
 
 ```csv
-timestamp,symbol,structure,spot_price,front_dte,back_dte,front_expiry,back_expiry,atm_strike,call_strike,put_strike,call_delta,put_delta,front_iv,back_iv,fwd_iv,ff,call_ff,put_ff,combined_ff,earnings_date,earnings_conflict,liquidity_rating,liquidity_value,iv_source_front,iv_source_back
-2025-10-19T14:30:00.123456+00:00,SPY,double-call,580.50,30,60,2025-11-18,2025-12-18,,595.00,,0.3498,,0.192456,0.175234,0.163512,,0.177123,,0.177123,,no,5,,greeks,greeks
+timestamp,symbol,structure,call_ff,put_ff,combined_ff,spot_price,front_dte,back_dte,front_expiry,back_expiry,atm_strike,call_strike,put_strike,call_delta,put_delta,call_front_iv,call_back_iv,call_fwd_iv,put_front_iv,put_back_iv,put_fwd_iv,earnings_conflict,earnings_date,liquidity_rating,liquidity_value,iv_source_call_front,iv_source_call_back,iv_source_put_front,iv_source_put_back
+2025-10-19T14:30:00+00:00,SPY,double,0.177123,0.167523,0.172323,580.50,30,60,2025-11-18,2025-12-18,,595.00,565.00,0.3498,-0.3512,0.192456,0.175234,0.163512,0.188234,0.173456,0.161234,no,,5,,greeks,greeks,greeks,greeks
 ```
 
-**Double Put Calendar:**
-
-```csv
-timestamp,symbol,structure,spot_price,front_dte,back_dte,front_expiry,back_expiry,atm_strike,call_strike,put_strike,call_delta,put_delta,front_iv,back_iv,fwd_iv,ff,call_ff,put_ff,combined_ff,earnings_date,earnings_conflict,liquidity_rating,liquidity_value,iv_source_front,iv_source_back
-2025-10-19T14:30:00.123456+00:00,SPY,double-put,580.50,30,60,2025-11-18,2025-12-18,,,565.00,,-0.3512,0.188234,0.173456,0.161234,,,0.167523,0.167523,,no,5,,greeks,greeks
-```
+**Key Differences:**
+- **ATM Calendar:** `atm_strike` populated, `call_strike` and `put_strike` empty, call/put IVs from SAME strike
+- **Double Calendar:** `call_strike` and `put_strike` populated, `atm_strike` empty, call/put IVs from DIFFERENT strikes
+- **X-earn IV:** ATM calendar shows `xearn` for all IV sources (when available)
+- **Greeks IV:** Double calendar shows `greeks` (X-earn IV works for double calendars too, this example just shows Greeks)
 
 ### Sorting
 
@@ -606,9 +624,10 @@ Results are sorted by:
 ### Null Handling
 
 Structure-specific columns are left **empty** (not "N/A" or "null") when not applicable:
-- ATM calendars: `call_strike`, `put_strike`, `call_delta`, `put_delta`, `call_ff`, `put_ff` are empty
-- Double call calendars: `atm_strike`, `put_strike`, `put_delta`, `ff`, `put_ff` are empty
-- Double put calendars: `atm_strike`, `call_strike`, `call_delta`, `ff`, `call_ff` are empty
+- **ATM calendars:** `call_strike`, `put_strike`, `call_delta`, `put_delta` are empty
+- **Double calendars:** `atm_strike` is empty
+
+Note: All other columns are populated for both structures. The key difference is which strike columns are used.
 
 ---
 
@@ -808,10 +827,10 @@ source ~/.zshrc
 
 **Expected Behavior:**
 
-- ATM calendars: `call_strike`, `put_strike`, `call_delta`, `put_delta`, `call_ff`, `put_ff` are empty
-- Double calendars: `atm_strike`, `ff` are empty
+- ATM calendars: `call_strike`, `put_strike`, `call_delta`, `put_delta` are empty
+- Double calendars: `atm_strike` is empty
 
-This is **correct** - the schema is unified for all structures. Use `structure` column to identify which columns are relevant.
+This is **correct** - the schema is unified for all structures. All IV and FF columns are populated for both structures. Use `structure` column to identify which strike columns are relevant.
 
 #### 10. "ERROR: --skip-earnings and --allow-earnings are mutually exclusive"
 
@@ -982,11 +1001,11 @@ python scripts/ff_tastytrade_scanner.py \
 **Output:**
 
 ```csv
-timestamp,symbol,structure,spot_price,front_dte,back_dte,atm_strike,...
-2025-10-19T20:23:05.134570+00:00,/ES,atm-call,6702.50,30,61,6700.00,...
-2025-10-19T20:23:05.134570+00:00,/NQ,atm-call,24986.50,33,61,25000.00,...
-2025-10-19T20:23:05.134570+00:00,/GC,atm-call,4213.30,30,65,4215.00,...
-2025-10-19T20:23:05.134570+00:00,/CL,atm-call,57.54,29,58,57.50,...
+timestamp,symbol,structure,call_ff,put_ff,combined_ff,spot_price,front_dte,back_dte,atm_strike,...
+2025-10-19T20:23:05+00:00,/ES,atm-call,0.2134,0.2129,0.2132,6702.50,30,61,6700.00,...
+2025-10-19T20:23:05+00:00,/NQ,atm-call,0.2543,0.2538,0.2541,24986.50,33,61,25000.00,...
+2025-10-19T20:23:05+00:00,/GC,atm-call,0.1987,0.1982,0.1985,4213.30,30,65,4215.00,...
+2025-10-19T20:23:05+00:00,/CL,atm-call,0.2456,0.2451,0.2454,57.54,29,58,57.50,...
 ```
 
 **Use Case:** Scan liquid futures for calendar spread opportunities. Futures don't have earnings, so earnings filtering is automatically bypassed.

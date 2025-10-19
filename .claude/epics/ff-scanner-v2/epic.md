@@ -2,8 +2,9 @@
 name: ff-scanner-v2
 status: in-progress
 created: 2025-10-19T08:30:29Z
-updated: 2025-10-19T16:52:10Z
-progress: 50%
+updated: 2025-10-19T18:47:51Z
+last_sync: 2025-10-19T18:47:51Z
+progress: 73%
 prd: .claude/prds/ff-scanner-v2.md
 github: https://github.com/scrooop/ffcs_strategy/issues/1
 ---
@@ -445,20 +446,20 @@ All task files are located in `.claude/epics/ff-scanner-v2/tasks/`
 
 ## Tasks Created
 
-- [ ] 001.md - Market Metrics Integration (parallel: true, 3-4 hours)
-- [ ] 002.md - Enhanced Greeks Collection (parallel: true, 1-2 hours)
-- [ ] 003.md - Double Calendar Strike Selection (parallel: false, depends on 002, 3-4 hours)
-- [ ] 004.md - Double Calendar Scanning Logic (parallel: false, depends on 002, 003, 3-4 hours)
-- [ ] 005.md - X-earn IV Integration (parallel: true, 2-3 hours)
-- [ ] 006.md - Enhanced CSV Output (parallel: false, depends on 001, 002, 004, 005, 2 hours)
-- [ ] 007.md - CLI Enhancement & Help Documentation (parallel: false, depends on 001, 003, 004, 005, 1-2 hours)
-- [ ] 008.md - Integration Testing & Validation (parallel: false, depends on 001-007, 2-3 hours)
-- [ ] 009.md - Documentation Updates (parallel: true, depends on 001-007, 2-3 hours)
-- [ ] 010.md - Error Handling & Edge Cases (parallel: true, depends on 001-006, 2 hours)
+- [x] #2 - Market Metrics Integration (parallel: true, 3-4 hours) [COMPLETED]
+- [x] #3 - Enhanced Greeks Collection (parallel: true, 1-2 hours) [COMPLETED]
+- [x] #4 - Double Calendar Strike Selection (parallel: false, depends on #3, 3-4 hours) [COMPLETED]
+- [x] #5 - Double Calendar Scanning Logic (parallel: false, depends on #3, #4, 3-4 hours) [COMPLETED]
+- [x] #6 - X-earn IV Integration (parallel: true, 2-3 hours) [COMPLETED]
+- [x] #7 - Enhanced CSV Output (parallel: false, depends on #2, #3, #5, #6, 2 hours) [COMPLETED]
+- [x] #8 - CLI Enhancement & Help Documentation (parallel: false, depends on #2, #4, #5, #6, 1-2 hours) [COMPLETED]
+- [ ] #9 - Integration Testing & Validation (parallel: false, depends on #2-#8, 2-3 hours)
+- [ ] #10 - Documentation Updates (parallel: true, depends on #2-#8, 2-3 hours)
+- [ ] #11 - Error Handling & Edge Cases (parallel: true, depends on #2-#7, 2 hours)
 
 **Total tasks:** 10
-**Parallel tasks:** 4 (001, 002, 005, 009, 010)
-**Sequential tasks:** 6 (003, 004, 006, 007, 008)
+**Parallel tasks:** 4 (#2, #3, #6, #10, #11)
+**Sequential tasks:** 6 (#4, #5, #7, #8, #9)
 **Estimated total effort:** 21-28 hours
 
 ## Notes

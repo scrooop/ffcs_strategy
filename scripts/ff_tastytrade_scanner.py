@@ -749,15 +749,20 @@ async def scan(session: Session, tickers: List[str], pairs: List[Tuple[int, int]
         delta_tolerance: Max delta deviation for double calendars (default 0.05 = ±5Δ)
 
     Returns:
-        List of dict rows with 25-column unified CSV schema:
-        - timestamp, symbol, structure, spot_price
-        - front_dte, back_dte, front_expiry, back_expiry
-        - atm_strike, call_strike, put_strike, call_delta, put_delta
-        - front_iv, back_iv, fwd_iv
-        - ff, call_ff, put_ff, combined_ff
-        - earnings_date, earnings_conflict
+        List of dict rows with 28-column unified CSV schema:
+        - timestamp, symbol, structure
+        - call_ff, put_ff, combined_ff (FF metrics - primary sort key)
+        - spot_price, front_dte, back_dte, front_expiry, back_expiry
+        - atm_strike (ATM calendars only), call_strike, put_strike, call_delta, put_delta
+        - call_front_iv, call_back_iv, call_fwd_iv (call leg IVs)
+        - put_front_iv, put_back_iv, put_fwd_iv (put leg IVs)
+        - earnings_conflict, earnings_date
         - liquidity_rating, liquidity_value
-        - iv_source_front, iv_source_back
+        - iv_source_call_front, iv_source_call_back (call leg IV sources: "xearn" or "greeks")
+        - iv_source_put_front, iv_source_put_back (put leg IV sources)
+
+        For ATM calendars: call and put IVs are from same strike (may differ slightly)
+        For double calendars: call and put IVs are from different strikes (+35Δ vs -35Δ)
 
         Sorted by combined_ff descending, then symbol ascending.
 
@@ -911,82 +916,123 @@ async def scan(session: Session, tickers: List[str], pairs: List[Tuple[int, int]
                 front_put = front_choice["put_35delta"]
                 back_put = back_choice["put_35delta"]
 
-                # We need at least one complete calendar (call or put)
+                # DOUBLE CALENDAR REQUIRES BOTH LEGS
                 has_call_calendar = front_call is not None and back_call is not None
                 has_put_calendar = front_put is not None and back_put is not None
 
-                if not (has_call_calendar or has_put_calendar):
+                # Skip if we don't have BOTH call and put calendars
+                if not (has_call_calendar and has_put_calendar):
                     continue
 
-                # Process call calendar
-                if has_call_calendar:
-                    fwd_call = forward_iv(front_call.iv, back_call.iv, front_choice["dte"], back_choice["dte"])
-                    if fwd_call and fwd_call > 0:
-                        ff_call = (front_call.iv - fwd_call) / fwd_call
-                        if ff_call >= min_ff or show_all_scans:
-                            rows.append({
-                                "timestamp": timestamp,
-                                "symbol": sym,
-                                "structure": "double-call",
-                                "spot_price": f"{spot:.2f}",
-                                "front_dte": front_choice["dte"],
-                                "back_dte": back_choice["dte"],
-                                "front_expiry": front_choice["expiration"].isoformat(),
-                                "back_expiry": back_choice["expiration"].isoformat(),
-                                "atm_strike": "",
-                                "call_strike": f"{front_call.strike:.2f}",
-                                "put_strike": "",
-                                "call_delta": round(front_call.actual_delta, 4),
-                                "put_delta": "",
-                                "front_iv": round(front_call.iv, 6),
-                                "back_iv": round(back_call.iv, 6),
-                                "fwd_iv": round(fwd_call, 6),
-                                "ff": "",
-                                "call_ff": round(ff_call, 6),
-                                "put_ff": "",
-                                "combined_ff": round(ff_call, 6),
-                                "earnings_date": earnings_date.isoformat() if earnings_date else "",
-                                "earnings_conflict": "no" if not earnings_date else "",
-                                "liquidity_rating": liquidity_rating if liquidity_rating is not None else "",
-                                "liquidity_value": "",
-                                "iv_source_front": "greeks",
-                                "iv_source_back": "greeks"
-                            })
+                # Calculate FFs for both legs
+                fwd_call = forward_iv(front_call.iv, back_call.iv, front_choice["dte"], back_choice["dte"])
+                fwd_put = forward_iv(front_put.iv, back_put.iv, front_choice["dte"], back_choice["dte"])
 
-                # Process put calendar
-                if has_put_calendar:
-                    fwd_put = forward_iv(front_put.iv, back_put.iv, front_choice["dte"], back_choice["dte"])
-                    if fwd_put and fwd_put > 0:
-                        ff_put = (front_put.iv - fwd_put) / fwd_put
-                        if ff_put >= min_ff or show_all_scans:
-                            rows.append({
-                                "timestamp": timestamp,
-                                "symbol": sym,
-                                "structure": "double-put",
-                                "spot_price": f"{spot:.2f}",
-                                "front_dte": front_choice["dte"],
-                                "back_dte": back_choice["dte"],
-                                "front_expiry": front_choice["expiration"].isoformat(),
-                                "back_expiry": back_choice["expiration"].isoformat(),
-                                "atm_strike": "",
-                                "call_strike": "",
-                                "put_strike": f"{front_put.strike:.2f}",
-                                "call_delta": "",
-                                "put_delta": round(front_put.actual_delta, 4),
-                                "front_iv": round(front_put.iv, 6),
-                                "back_iv": round(back_put.iv, 6),
-                                "fwd_iv": round(fwd_put, 6),
-                                "ff": "",
-                                "call_ff": "",
-                                "put_ff": round(ff_put, 6),
-                                "combined_ff": round(ff_put, 6),
-                                "earnings_date": earnings_date.isoformat() if earnings_date else "",
-                                "earnings_conflict": "no" if not earnings_date else "",
-                                "liquidity_rating": liquidity_rating if liquidity_rating is not None else "",
-                                "liquidity_value": "",
-                                "iv_source_front": "greeks",
-                                "iv_source_back": "greeks"
-                            })
+                if fwd_call is None or fwd_call <= 0 or fwd_put is None or fwd_put <= 0:
+                    continue
+
+                ff_call = (front_call.iv - fwd_call) / fwd_call
+                ff_put = (front_put.iv - fwd_put) / fwd_put
+
+                # Calculate combined FF (average of both legs)
+                combined_ff = (ff_call + ff_put) / 2.0
+
+                # Try X-earn IV first for double calendars (if enabled)
+                call_iv_source_front = "greeks"
+                call_iv_source_back = "greeks"
+                put_iv_source_front = "greeks"
+                put_iv_source_back = "greeks"
+
+                if use_xearn_iv and not force_greeks_iv:
+                    # Try X-earn IV for call leg
+                    xearn_call_front = extract_xearn_iv(market_metrics, sym, front_choice["expiration"])
+                    xearn_call_back = extract_xearn_iv(market_metrics, sym, back_choice["expiration"])
+
+                    if xearn_call_front and xearn_call_back:
+                        # Recalculate call leg using X-earn IV
+                        fwd_call_xearn = forward_iv(xearn_call_front, xearn_call_back, front_choice["dte"], back_choice["dte"])
+                        if fwd_call_xearn and fwd_call_xearn > 0:
+                            front_call_iv = xearn_call_front
+                            back_call_iv = xearn_call_back
+                            fwd_call = fwd_call_xearn
+                            ff_call = (front_call_iv - fwd_call) / fwd_call
+                            call_iv_source_front = "xearn"
+                            call_iv_source_back = "xearn"
+                        else:
+                            # X-earn IV failed, use Greeks
+                            front_call_iv = front_call.iv
+                            back_call_iv = back_call.iv
+                    else:
+                        # X-earn IV not available, use Greeks
+                        front_call_iv = front_call.iv
+                        back_call_iv = back_call.iv
+
+                    # Try X-earn IV for put leg
+                    xearn_put_front = extract_xearn_iv(market_metrics, sym, front_choice["expiration"])
+                    xearn_put_back = extract_xearn_iv(market_metrics, sym, back_choice["expiration"])
+
+                    if xearn_put_front and xearn_put_back:
+                        # Recalculate put leg using X-earn IV
+                        fwd_put_xearn = forward_iv(xearn_put_front, xearn_put_back, front_choice["dte"], back_choice["dte"])
+                        if fwd_put_xearn and fwd_put_xearn > 0:
+                            front_put_iv = xearn_put_front
+                            back_put_iv = xearn_put_back
+                            fwd_put = fwd_put_xearn
+                            ff_put = (front_put_iv - fwd_put) / fwd_put
+                            put_iv_source_front = "xearn"
+                            put_iv_source_back = "xearn"
+                        else:
+                            # X-earn IV failed, use Greeks
+                            front_put_iv = front_put.iv
+                            back_put_iv = back_put.iv
+                    else:
+                        # X-earn IV not available, use Greeks
+                        front_put_iv = front_put.iv
+                        back_put_iv = back_put.iv
+
+                    # Recalculate combined_ff if X-earn was used
+                    combined_ff = (ff_call + ff_put) / 2.0
+                else:
+                    # Use Greeks IV (already calculated above)
+                    front_call_iv = front_call.iv
+                    back_call_iv = back_call.iv
+                    front_put_iv = front_put.iv
+                    back_put_iv = back_put.iv
+
+                # Filter on combined_ff
+                if combined_ff >= min_ff or show_all_scans:
+                    rows.append({
+                        "timestamp": timestamp,
+                        "symbol": sym,
+                        "structure": "double",
+                        "call_ff": round(ff_call, 6),
+                        "put_ff": round(ff_put, 6),
+                        "combined_ff": round(combined_ff, 6),
+                        "spot_price": f"{spot:.2f}",
+                        "front_dte": front_choice["dte"],
+                        "back_dte": back_choice["dte"],
+                        "front_expiry": front_choice["expiration"].isoformat(),
+                        "back_expiry": back_choice["expiration"].isoformat(),
+                        "atm_strike": "",
+                        "call_strike": f"{front_call.strike:.2f}",
+                        "put_strike": f"{front_put.strike:.2f}",
+                        "call_delta": round(front_call.actual_delta, 4),
+                        "put_delta": round(front_put.actual_delta, 4),
+                        "call_front_iv": round(front_call_iv, 6),
+                        "call_back_iv": round(back_call_iv, 6),
+                        "call_fwd_iv": round(fwd_call, 6),
+                        "put_front_iv": round(front_put_iv, 6),
+                        "put_back_iv": round(back_put_iv, 6),
+                        "put_fwd_iv": round(fwd_put, 6),
+                        "earnings_conflict": "no" if not earnings_date else "",
+                        "earnings_date": earnings_date.isoformat() if earnings_date else "",
+                        "liquidity_rating": liquidity_rating if liquidity_rating is not None else "",
+                        "liquidity_value": "",
+                        "iv_source_call_front": call_iv_source_front,
+                        "iv_source_call_back": call_iv_source_back,
+                        "iv_source_put_front": put_iv_source_front,
+                        "iv_source_put_back": put_iv_source_back
+                    })
 
         if scan_atm:
             # ========== ATM CALENDAR MODE (existing logic) ==========
@@ -1013,19 +1059,25 @@ async def scan(session: Session, tickers: List[str], pairs: List[Tuple[int, int]
                 continue
 
             # 4) Try X-earn IV first (if enabled), then fall back to Greeks IV
-            atm_iv_by_target: Dict[int, float] = {}
-            iv_source_by_target: Dict[int, str] = {}
+            # Store call and put IVs separately for transparency
+            call_iv_by_target: Dict[int, float] = {}
+            put_iv_by_target: Dict[int, float] = {}
+            call_iv_source_by_target: Dict[int, str] = {}
+            put_iv_source_by_target: Dict[int, str] = {}
 
-                # Try X-earn IV for each target DTE
+            # Try X-earn IV for each target DTE
             if use_xearn_iv and not force_greeks_iv:
                 for target, ch in choices.items():
                     xearn_iv = extract_xearn_iv(market_metrics, sym, ch.expiration)
                     if xearn_iv is not None and xearn_iv > 0:
-                        atm_iv_by_target[target] = xearn_iv
-                        iv_source_by_target[target] = "xearn"
+                        # X-earn IV is not call/put specific, use for both
+                        call_iv_by_target[target] = xearn_iv
+                        put_iv_by_target[target] = xearn_iv
+                        call_iv_source_by_target[target] = "xearn"
+                        put_iv_source_by_target[target] = "xearn"
 
             # For targets without X-earn IV, fall back to Greeks IV
-            targets_needing_greeks = [t for t in choices.keys() if t not in atm_iv_by_target]
+            targets_needing_greeks = [t for t in choices.keys() if t not in call_iv_by_target]
 
             if targets_needing_greeks or force_greeks_iv:
                 # Snapshot Greeks (to get IV and delta) for all needed ATM contracts
@@ -1033,7 +1085,7 @@ async def scan(session: Session, tickers: List[str], pairs: List[Tuple[int, int]
 
                 for target, ch in choices.items():
                     # Skip if X-earn IV already available (unless force_greeks_iv)
-                    if target in atm_iv_by_target and not force_greeks_iv:
+                    if target in call_iv_by_target and not force_greeks_iv:
                         continue
 
                     call_iv = None
@@ -1046,46 +1098,69 @@ async def scan(session: Session, tickers: List[str], pairs: List[Tuple[int, int]
                         iv, delta = greek_map[ch.put_streamer_symbol]
                         put_iv = iv if iv is not None and iv > 0 else None
 
-                    # If both present, average; if one present, use it.
-                    ivs = [v for v in [call_iv, put_iv] if v and v > 0]
-                    if ivs:
-                        atm_iv_by_target[target] = sum(ivs) / len(ivs)
-                        iv_source_by_target[target] = "greeks"
+                    # Store call and put IVs separately
+                    if call_iv:
+                        call_iv_by_target[target] = call_iv
+                        call_iv_source_by_target[target] = "greeks"
+                    if put_iv:
+                        put_iv_by_target[target] = put_iv
+                        put_iv_source_by_target[target] = "greeks"
 
             # Log X-earn IV fallback warnings
             if use_xearn_iv and not force_greeks_iv:
                 for target in choices.keys():
-                    if target not in iv_source_by_target or iv_source_by_target[target] == "greeks":
+                    if target not in call_iv_source_by_target or call_iv_source_by_target[target] == "greeks":
                         print(f"[INFO] {sym} {target}DTE: X-earn IV unavailable, using Greeks IV", file=sys.stderr)
 
             # 6) Build rows for pairs
             for front, back in pairs:
                 if front not in choices or back not in choices:
                     continue
-                if front not in atm_iv_by_target or back not in atm_iv_by_target:
-                    continue
 
                 front_choice = choices[front]
                 back_choice = choices[back]
-                iv_f = atm_iv_by_target[front]
-                iv_b = atm_iv_by_target[back]
 
-                fwd = forward_iv(iv_f, iv_b, front_choice.dte, back_choice.dte)
-                if fwd is None:
+                # Need both call and put IVs for both expirations
+                if front not in call_iv_by_target or front not in put_iv_by_target:
                     continue
-                ff = (iv_f - fwd) / fwd if fwd > 0 else None
-                if ff is None:
+                if back not in call_iv_by_target or back not in put_iv_by_target:
                     continue
 
-                # Determine IV source for this pair (prefer front, fall back to back)
-                iv_src = iv_source_by_target.get(front, iv_source_by_target.get(back, "greeks"))
+                call_iv_f = call_iv_by_target[front]
+                call_iv_b = call_iv_by_target[back]
+                put_iv_f = put_iv_by_target[front]
+                put_iv_b = put_iv_by_target[back]
+
+                # Calculate call FF
+                call_fwd = forward_iv(call_iv_f, call_iv_b, front_choice.dte, back_choice.dte)
+                if call_fwd is None or call_fwd <= 0:
+                    continue
+                call_ff = (call_iv_f - call_fwd) / call_fwd
+
+                # Calculate put FF
+                put_fwd = forward_iv(put_iv_f, put_iv_b, front_choice.dte, back_choice.dte)
+                if put_fwd is None or put_fwd <= 0:
+                    continue
+                put_ff = (put_iv_f - put_fwd) / put_fwd
+
+                # Combined FF is average of call and put
+                combined_ff = (call_ff + put_ff) / 2.0
+
+                # Determine IV sources
+                call_iv_src_front = call_iv_source_by_target.get(front, "greeks")
+                call_iv_src_back = call_iv_source_by_target.get(back, "greeks")
+                put_iv_src_front = put_iv_source_by_target.get(front, "greeks")
+                put_iv_src_back = put_iv_source_by_target.get(back, "greeks")
 
                 # Include result if: (1) meets FF threshold, OR (2) show_all_scans is enabled
-                if ff >= min_ff or show_all_scans:
+                if combined_ff >= min_ff or show_all_scans:
                     rows.append({
                         "timestamp": timestamp,
                         "symbol": sym,
                         "structure": "atm-call",
+                        "call_ff": round(call_ff, 6),
+                        "put_ff": round(put_ff, 6),
+                        "combined_ff": round(combined_ff, 6),
                         "spot_price": f"{spot:.2f}",
                         "front_dte": front_choice.dte,
                         "back_dte": back_choice.dte,
@@ -1096,19 +1171,20 @@ async def scan(session: Session, tickers: List[str], pairs: List[Tuple[int, int]
                         "put_strike": "",
                         "call_delta": "",
                         "put_delta": "",
-                        "front_iv": round(iv_f, 6),
-                        "back_iv": round(iv_b, 6),
-                        "fwd_iv": round(fwd, 6),
-                        "ff": round(ff, 6),
-                        "call_ff": "",
-                        "put_ff": "",
-                        "combined_ff": round(ff, 6),
-                        "earnings_date": earnings_date.isoformat() if earnings_date else "",
+                        "call_front_iv": round(call_iv_f, 6),
+                        "call_back_iv": round(call_iv_b, 6),
+                        "call_fwd_iv": round(call_fwd, 6),
+                        "put_front_iv": round(put_iv_f, 6),
+                        "put_back_iv": round(put_iv_b, 6),
+                        "put_fwd_iv": round(put_fwd, 6),
                         "earnings_conflict": "no" if not earnings_date else "",
+                        "earnings_date": earnings_date.isoformat() if earnings_date else "",
                         "liquidity_rating": liquidity_rating if liquidity_rating is not None else "",
                         "liquidity_value": "",
-                        "iv_source_front": iv_src,
-                        "iv_source_back": iv_src
+                        "iv_source_call_front": call_iv_src_front,
+                        "iv_source_call_back": call_iv_src_back,
+                        "iv_source_put_front": put_iv_src_front,
+                        "iv_source_put_back": put_iv_src_back
                     })
 
     # Sort by combined_ff descending (highest FF first), then by symbol ascending
@@ -1262,16 +1338,19 @@ Examples:
         delta_tolerance=args.delta_tolerance
     ))
 
-    # Unified 25-column CSV schema
+    # Unified 28-column CSV schema
     cols = [
-        "timestamp", "symbol", "structure", "spot_price",
+        "timestamp", "symbol", "structure",
+        "call_ff", "put_ff", "combined_ff",
+        "spot_price",
         "front_dte", "back_dte", "front_expiry", "back_expiry",
         "atm_strike", "call_strike", "put_strike", "call_delta", "put_delta",
-        "front_iv", "back_iv", "fwd_iv",
-        "ff", "call_ff", "put_ff", "combined_ff",
-        "earnings_date", "earnings_conflict",
+        "call_front_iv", "call_back_iv", "call_fwd_iv",
+        "put_front_iv", "put_back_iv", "put_fwd_iv",
+        "earnings_conflict", "earnings_date",
         "liquidity_rating", "liquidity_value",
-        "iv_source_front", "iv_source_back"
+        "iv_source_call_front", "iv_source_call_back",
+        "iv_source_put_front", "iv_source_put_back"
     ]
 
     if not rows:

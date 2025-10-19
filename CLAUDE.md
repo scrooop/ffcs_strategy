@@ -227,10 +227,14 @@ python scripts/ff_tastytrade_scanner.py \
 - **FF Calculation:** `FF = (σ₁ - σ_fwd) / σ_fwd` where σ_fwd uses ATM IVs
 
 **For Double Calendars (±35Δ):**
+- **REQUIRES BOTH LEGS:** Call calendar AND put calendar must both be available
+  - If only one leg meets delta tolerance, symbol is skipped for double calendar structure
+  - May still appear in ATM structure if `--structure both` (default)
 - **Call calendar:** Uses IV from the **+35Δ call strike** at both expirations
 - **Put calendar:** Uses IV from the **−35Δ put strike** at both expirations
-- **Strike selection:** Finds strike with delta closest to ±0.35 (within ±0.05 tolerance)
+- **Strike selection:** Finds strike with delta closest to ±0.35 (within ±0.05 tolerance, default)
 - **Separate FF calculations:** Call and put calendars have independent FFs
+- **CSV output:** ONE row per double calendar with both call_strike and put_strike populated
 
 **Why IV Variation Matters:**
 
@@ -264,30 +268,52 @@ Given the same underlying and term structure, the three calendar structures will
 - `snapshot_greeks()`: Fetches actual IV from dxFeed for each specific strike
 - Forward IV calculation uses these strike-specific IVs, not interpolated surface values
 
-### CSV Output Schema (25 Columns)
+### CSV Output Schema (28 Columns)
 
 Results are sorted by `combined_ff` descending (highest opportunities first).
 
-**Columns:**
-- `timestamp`: ISO 8601 UTC timestamp (e.g., "2025-10-19T14:30:00Z")
+**IMPORTANT:** Double calendars REQUIRE BOTH call and put legs. If only one leg meets delta tolerance, the symbol is skipped for double calendar structure (but may still appear in ATM structure if `--structure both`).
+
+**Key Design Principle:**
+- ALL IVs are stored in call-specific and put-specific columns (no generic IV columns)
+- For ATM calendars: Call and put IVs are from the SAME strike (may differ slightly due to skew)
+- For double calendars: Call and put IVs are from DIFFERENT strikes (+35Δ vs -35Δ)
+- This design provides maximum transparency and consistency across structures
+
+**Common Columns (All Structures):**
+- `timestamp`: ISO 8601 UTC timestamp (e.g., "2025-10-19T14:30:00+00:00")
 - `symbol`: Ticker symbol
-- `structure`: "ATM" or "DOUBLE"
+- `structure`: "atm-call" or "double"
+- `call_ff`: Forward factor for call leg
+- `put_ff`: Forward factor for put leg
+- `combined_ff`: Average of call_ff and put_ff (primary sorting metric)
 - `spot_price`: Current underlying price
 - `front_dte`, `back_dte`: Days to expiration
 - `front_expiry`, `back_expiry`: Expiration dates (YYYY-MM-DD)
-- `atm_strike`: ATM strike (for ATM structure, null for DOUBLE)
-- `call_strike`, `put_strike`: Strikes for double calendar (null for ATM structure)
-- `call_delta`, `put_delta`: Delta values for double calendar legs
-- `front_iv`, `back_iv`: Front and back IVs (decimal format: 0.25 = 25%)
-- `fwd_iv`: Computed forward IV
-- `ff`: Forward factor for ATM structure
-- `call_ff`, `put_ff`: Forward factors for call and put legs (double calendar)
-- `combined_ff`: Average of call_ff and put_ff (used for sorting)
-- `earnings_date`: Next earnings date (YYYY-MM-DD, null if none)
-- `earnings_conflict`: Boolean indicating earnings conflict
+- `call_front_iv`, `call_back_iv`, `call_fwd_iv`: Call leg IVs (decimal: 0.25 = 25%)
+- `put_front_iv`, `put_back_iv`, `put_fwd_iv`: Put leg IVs (decimal: 0.25 = 25%)
+- `earnings_conflict`: "yes" or "no"
+- `earnings_date`: Next earnings date (YYYY-MM-DD, empty if none)
 - `liquidity_rating`: Liquidity rating 0-5
-- `liquidity_value`: Numeric liquidity metric
-- `iv_source_front`, `iv_source_back`: "xearn" or "greeks"
+- `liquidity_value`: Numeric liquidity metric (currently unused)
+- `iv_source_call_front`, `iv_source_call_back`: Call IV sources ("xearn" or "greeks")
+- `iv_source_put_front`, `iv_source_put_back`: Put IV sources ("xearn" or "greeks")
+
+**ATM Calendar Specific (structure="atm-call"):**
+- `atm_strike`: Strike closest to spot (same strike used for call and put)
+- `call_front_iv`, `put_front_iv`: IVs from call and put at ATM strike (may differ)
+- `call_ff`, `put_ff`: Separate FFs for call and put (usually very similar)
+- Empty: `call_strike`, `put_strike`, `call_delta`, `put_delta`
+
+**Double Calendar Specific (structure="double"):**
+- `call_strike`, `put_strike`: +35Δ call strike and -35Δ put strike (different strikes)
+- `call_delta`, `put_delta`: Actual deltas of selected strikes
+- `call_front_iv`, `put_front_iv`: IVs from different strikes (skew creates differences)
+- `call_ff`, `put_ff`: Separate FFs for each leg (may vary significantly due to skew)
+- Empty: `atm_strike`
+
+**Complete Column Order:**
+`timestamp`, `symbol`, `structure`, `call_ff`, `put_ff`, `combined_ff`, `spot_price`, `front_dte`, `back_dte`, `front_expiry`, `back_expiry`, `atm_strike`, `call_strike`, `put_strike`, `call_delta`, `put_delta`, `call_front_iv`, `call_back_iv`, `call_fwd_iv`, `put_front_iv`, `put_back_iv`, `put_fwd_iv`, `earnings_conflict`, `earnings_date`, `liquidity_rating`, `liquidity_value`, `iv_source_call_front`, `iv_source_call_back`, `iv_source_put_front`, `iv_source_put_back`
 
 ## Strategy Implementation Notes
 

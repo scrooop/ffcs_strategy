@@ -339,7 +339,11 @@ async def scan(session: Session, tickers: List[str], pairs: List[Tuple[int, int]
     # Fetch market metrics for all symbols upfront (batched)
     market_metrics = fetch_market_metrics(session, tickers)
 
-    for sym in tickers:
+    for idx, sym in enumerate(tickers):
+        # Add small delay between symbols to avoid rate limiting (except for first symbol)
+        if idx > 0:
+            await asyncio.sleep(0.5)  # 500ms delay between symbols
+
         # 1) Underlying spot
         md = get_market_data(session, sym, InstrumentType.EQUITY)
         if md is None or md.last is None:
@@ -509,9 +513,9 @@ def main():
 
     # Earnings filtering flags
     ap.add_argument("--skip-earnings", dest="skip_earnings", action="store_true", default=True,
-                    help="Skip positions with earnings conflicts (default: True).")
-    ap.add_argument("--allow-earnings", dest="skip_earnings", action="store_false",
-                    help="Allow trading through earnings (overrides --skip-earnings).")
+                    help="Skip positions with earnings conflicts (default).")
+    ap.add_argument("--allow-earnings", dest="allow_earnings", action="store_true", default=False,
+                    help="Allow trading through earnings (disable earnings filtering).")
     ap.add_argument("--show-earnings-conflicts", action="store_true",
                     help="Show filtered positions due to earnings.")
 
@@ -541,9 +545,12 @@ def main():
     session = Session(username, password=password, is_test=bool(args.sandbox))
 
     # Run scan
+    # If --allow-earnings is explicitly set, disable earnings filtering
+    skip_earnings_flag = not args.allow_earnings if args.allow_earnings else args.skip_earnings
+
     rows = asyncio.run(scan(
         session, tickers, pairs, args.min_ff, args.dte_tolerance, args.timeout,
-        skip_earnings=args.skip_earnings,
+        skip_earnings=skip_earnings_flag,
         min_liquidity_rating=args.min_liquidity_rating,
         skip_liquidity_check=args.skip_liquidity_check,
         show_earnings_conflicts=args.show_earnings_conflicts,

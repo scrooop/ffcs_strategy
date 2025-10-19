@@ -47,13 +47,37 @@ The FF Scanner is a production-ready CLI tool that scans liquid options to ident
 - Python 3.12+ (tested with 3.12.3)
 - tastytrade production account (sandbox has limited market data)
 
-### Install SDK
+### Step 1: Create Virtual Environment
+
+**IMPORTANT:** Always use a virtual environment to isolate dependencies.
+
+```bash
+# Navigate to project directory
+cd /path/to/ffcs_strategy
+
+# Create virtual environment
+python3 -m venv venv
+
+# Activate virtual environment
+source venv/bin/activate  # macOS/Linux
+# OR
+venv\Scripts\activate     # Windows
+```
+
+**You must activate the venv every time you open a new terminal:**
+```bash
+source venv/bin/activate  # Run this in each new terminal session
+```
+
+### Step 2: Install SDK
+
+**With venv activated**, install the tastytrade SDK:
 
 ```bash
 python -m pip install --upgrade tastytrade
 ```
 
-### Set Environment Variables
+### Step 3: Set Environment Variables
 
 Add to your `~/.zshrc` or `~/.bashrc`:
 
@@ -68,11 +92,17 @@ Then reload your shell:
 source ~/.zshrc  # or source ~/.bashrc
 ```
 
-### Verify Installation
+### Step 4: Verify Installation
+
+**With venv activated**, verify the scanner works:
 
 ```bash
 python scripts/ff_tastytrade_scanner.py --help
 ```
+
+**If you see `ModuleNotFoundError: No module named 'tastytrade'`:**
+- You forgot to activate the venv (run `source venv/bin/activate`)
+- Or you installed tastytrade outside the venv (reinstall with venv active)
 
 ---
 
@@ -81,6 +111,10 @@ python scripts/ff_tastytrade_scanner.py --help
 **Daily pre-market scan (recommended for production):**
 
 ```bash
+# Activate venv first (if not already active)
+source venv/bin/activate
+
+# Run daily scan
 python scripts/ff_tastytrade_scanner.py \
   --tickers SPY QQQ AAPL TSLA NVDA META AMZN GOOGL MSFT AMD \
   --pairs 30-60 30-90 60-90 \

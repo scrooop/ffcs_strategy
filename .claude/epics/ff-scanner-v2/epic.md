@@ -1,10 +1,11 @@
 ---
 name: ff-scanner-v2
-status: backlog
+status: in-progress
 created: 2025-10-19T08:30:29Z
-progress: 0%
+updated: 2025-10-19T16:52:10Z
+progress: 50%
 prd: .claude/prds/ff-scanner-v2.md
-github: [Will be updated when synced to GitHub]
+github: https://github.com/scrooop/ffcs_strategy/issues/1
 ---
 
 # Epic: FF Scanner v2.0 - Enhanced Quality Filtering

@@ -29,7 +29,7 @@ import json
 import asyncio
 import argparse
 from dataclasses import dataclass
-from datetime import date
+from datetime import date, datetime
 from typing import Dict, List, Tuple, Optional
 
 from tastytrade import Session, DXLinkStreamer
@@ -463,11 +463,12 @@ async def scan(session: Session, tickers: List[str], pairs: List[Tuple[int, int]
                skip_earnings: bool = True, min_liquidity_rating: int = 3,
                skip_liquidity_check: bool = False, show_earnings_conflicts: bool = False,
                use_xearn_iv: bool = True, force_greeks_iv: bool = False,
-               show_all_scans: bool = False, double_calendar: bool = False,
+               show_all_scans: bool = False, structure: str = "both",
                delta_tolerance: float = 0.05) -> List[dict]:
     rows: List[dict] = []
     filtered_rows: List[dict] = []  # For --show-earnings-conflicts
     today = ny_today()
+    timestamp = datetime.utcnow().isoformat() + 'Z'  # ISO 8601 UTC timestamp
 
     # Fetch market metrics for all symbols upfront (batched)
     market_metrics = fetch_market_metrics(session, tickers)
@@ -483,7 +484,18 @@ async def scan(session: Session, tickers: List[str], pairs: List[Tuple[int, int]
             print(f"[WARN] No quote for {sym}, skipping.", file=sys.stderr)
             continue
         spot = float(md.last) if md.last is not None else float(md.mark)
-        # 2) Chain (nested)
+
+        # 2) Extract earnings and liquidity data for this symbol
+        earnings_date = None
+        liquidity_rating = None
+        if sym in market_metrics:
+            metric_info = market_metrics[sym]
+            earnings = getattr(metric_info, 'earnings', None)
+            if earnings:
+                earnings_date = getattr(earnings, 'expected_report_date', None)
+            liquidity_rating = getattr(metric_info, 'liquidity_rating', None)
+
+        # 3) Chain (nested)
         chain_list = NestedOptionChain.get(session, sym)
         if not chain_list:
             print(f"[WARN] No option chain for {sym}, skipping.", file=sys.stderr)
@@ -513,10 +525,14 @@ async def scan(session: Session, tickers: List[str], pairs: List[Tuple[int, int]
                 print(f"[INFO] {sym}: {reason}, skipping", file=sys.stderr)
                 continue
 
-        # 3) Branch based on calendar structure mode
+        # 4) Branch based on calendar structure mode
         required_targets = sorted(set([t for pair in pairs for t in pair]))
 
-        if double_calendar:
+        # Determine which structures to scan
+        scan_double = structure in ("double", "both")
+        scan_atm = structure in ("atm-call", "both")
+
+        if scan_double:
             # ========== DOUBLE CALENDAR MODE ==========
             # Get ±35Δ strikes for each target DTE
             delta_choices: Dict[int, Dict] = {}
@@ -578,23 +594,32 @@ async def scan(session: Session, tickers: List[str], pairs: List[Tuple[int, int]
                         ff_call = (front_call.iv - fwd_call) / fwd_call
                         if ff_call >= min_ff or show_all_scans:
                             rows.append({
+                                "timestamp": timestamp,
                                 "symbol": sym,
-                                "calendar_type": "call",
-                                "front_target_dte": front,
-                                "front_exp": front_choice["expiration"].isoformat(),
+                                "structure": "double-call",
+                                "spot_price": f"{spot:.2f}",
                                 "front_dte": front_choice["dte"],
-                                "front_strike": f"{front_call.strike:.2f}",
-                                "front_delta": round(front_call.actual_delta, 4),
-                                "front_iv": round(front_call.iv, 6),
-                                "back_target_dte": back,
-                                "back_exp": back_choice["expiration"].isoformat(),
                                 "back_dte": back_choice["dte"],
-                                "back_strike": f"{back_call.strike:.2f}",
-                                "back_delta": round(back_call.actual_delta, 4),
+                                "front_expiry": front_choice["expiration"].isoformat(),
+                                "back_expiry": back_choice["expiration"].isoformat(),
+                                "atm_strike": "",
+                                "call_strike": f"{front_call.strike:.2f}",
+                                "put_strike": "",
+                                "call_delta": round(front_call.actual_delta, 4),
+                                "put_delta": "",
+                                "front_iv": round(front_call.iv, 6),
                                 "back_iv": round(back_call.iv, 6),
                                 "fwd_iv": round(fwd_call, 6),
-                                "ff_ratio": round(ff_call, 6),
-                                "iv_source": "greeks"  # Delta strikes always use Greeks IV
+                                "ff": "",
+                                "call_ff": round(ff_call, 6),
+                                "put_ff": "",
+                                "combined_ff": round(ff_call, 6),
+                                "earnings_date": earnings_date.isoformat() if earnings_date else "",
+                                "earnings_conflict": "no" if not earnings_date else "",
+                                "liquidity_rating": liquidity_rating if liquidity_rating is not None else "",
+                                "liquidity_value": "",
+                                "iv_source_front": "greeks",
+                                "iv_source_back": "greeks"
                             })
 
                 # Process put calendar
@@ -604,26 +629,35 @@ async def scan(session: Session, tickers: List[str], pairs: List[Tuple[int, int]
                         ff_put = (front_put.iv - fwd_put) / fwd_put
                         if ff_put >= min_ff or show_all_scans:
                             rows.append({
+                                "timestamp": timestamp,
                                 "symbol": sym,
-                                "calendar_type": "put",
-                                "front_target_dte": front,
-                                "front_exp": front_choice["expiration"].isoformat(),
+                                "structure": "double-put",
+                                "spot_price": f"{spot:.2f}",
                                 "front_dte": front_choice["dte"],
-                                "front_strike": f"{front_put.strike:.2f}",
-                                "front_delta": round(front_put.actual_delta, 4),
-                                "front_iv": round(front_put.iv, 6),
-                                "back_target_dte": back,
-                                "back_exp": back_choice["expiration"].isoformat(),
                                 "back_dte": back_choice["dte"],
-                                "back_strike": f"{back_put.strike:.2f}",
-                                "back_delta": round(back_put.actual_delta, 4),
+                                "front_expiry": front_choice["expiration"].isoformat(),
+                                "back_expiry": back_choice["expiration"].isoformat(),
+                                "atm_strike": "",
+                                "call_strike": "",
+                                "put_strike": f"{front_put.strike:.2f}",
+                                "call_delta": "",
+                                "put_delta": round(front_put.actual_delta, 4),
+                                "front_iv": round(front_put.iv, 6),
                                 "back_iv": round(back_put.iv, 6),
                                 "fwd_iv": round(fwd_put, 6),
-                                "ff_ratio": round(ff_put, 6),
-                                "iv_source": "greeks"  # Delta strikes always use Greeks IV
+                                "ff": "",
+                                "call_ff": "",
+                                "put_ff": round(ff_put, 6),
+                                "combined_ff": round(ff_put, 6),
+                                "earnings_date": earnings_date.isoformat() if earnings_date else "",
+                                "earnings_conflict": "no" if not earnings_date else "",
+                                "liquidity_rating": liquidity_rating if liquidity_rating is not None else "",
+                                "liquidity_value": "",
+                                "iv_source_front": "greeks",
+                                "iv_source_back": "greeks"
                             })
 
-        else:
+        if scan_atm:
             # ========== ATM CALENDAR MODE (existing logic) ==========
             choices: Dict[int, ATMChoice] = {}
             streamer_syms: List[str] = []
@@ -718,24 +752,36 @@ async def scan(session: Session, tickers: List[str], pairs: List[Tuple[int, int]
                 # Include result if: (1) meets FF threshold, OR (2) show_all_scans is enabled
                 if ff >= min_ff or show_all_scans:
                     rows.append({
+                        "timestamp": timestamp,
                         "symbol": sym,
-                        "front_target_dte": front,
-                        "front_exp": front_choice.expiration.isoformat(),
+                        "structure": "atm-call",
+                        "spot_price": f"{spot:.2f}",
                         "front_dte": front_choice.dte,
-                        "front_atm_strike": f"{front_choice.strike:.2f}",
-                        "front_atm_iv": round(iv_f, 6),
-                        "back_target_dte": back,
-                        "back_exp": back_choice.expiration.isoformat(),
                         "back_dte": back_choice.dte,
-                        "back_atm_strike": f"{back_choice.strike:.2f}",
-                        "back_atm_iv": round(iv_b, 6),
+                        "front_expiry": front_choice.expiration.isoformat(),
+                        "back_expiry": back_choice.expiration.isoformat(),
+                        "atm_strike": f"{front_choice.strike:.2f}",
+                        "call_strike": "",
+                        "put_strike": "",
+                        "call_delta": "",
+                        "put_delta": "",
+                        "front_iv": round(iv_f, 6),
+                        "back_iv": round(iv_b, 6),
                         "fwd_iv": round(fwd, 6),
-                        "ff_ratio": round(ff, 6),
-                        "iv_source": iv_src,
+                        "ff": round(ff, 6),
+                        "call_ff": "",
+                        "put_ff": "",
+                        "combined_ff": round(ff, 6),
+                        "earnings_date": earnings_date.isoformat() if earnings_date else "",
+                        "earnings_conflict": "no" if not earnings_date else "",
+                        "liquidity_rating": liquidity_rating if liquidity_rating is not None else "",
+                        "liquidity_value": "",
+                        "iv_source_front": iv_src,
+                        "iv_source_back": iv_src
                     })
 
-    # Sort by highest FF
-    rows.sort(key=lambda r: r["ff_ratio"], reverse=True)
+    # Sort by combined_ff descending (highest FF first), then by symbol ascending
+    rows.sort(key=lambda r: (-r["combined_ff"], r["symbol"]))
     return rows
 
 def read_list_arg(values: List[str]) -> List[str]:
@@ -746,15 +792,47 @@ def read_list_arg(values: List[str]) -> List[str]:
     return [x.strip().upper() for x in out if x.strip()]
 
 def main():
-    ap = argparse.ArgumentParser(description="Forward-IV (FF) scanner using tastytrade API + dxFeed greeks.")
-    ap.add_argument("--tickers", nargs="+", required=True, help="List of underlyings. You can comma-separate or space-separate.")
-    ap.add_argument("--pairs", nargs="+", required=True, help="DTE pairs like 30-60 30-90 (front-back).")
-    ap.add_argument("--min-ff", type=float, default=0.20, help="Minimum FF ratio to include (default: 0.20).")
-    ap.add_argument("--dte-tolerance", type=int, default=5, help="Max absolute deviation allowed from target DTE (default: 5 days).")
-    ap.add_argument("--timeout", type=float, default=3.0, help="Streamer snapshot timeout in seconds (default: 3s).")
-    ap.add_argument("--sandbox", action="store_true", help="Use sandbox instead of production.")
-    ap.add_argument("--json-out", type=str, default="", help="Optional path to write JSON results.")
-    ap.add_argument("--csv-out", type=str, default="", help="Optional path to write CSV results.")
+    ap = argparse.ArgumentParser(
+        description="Forward-IV (FF) calendar spread scanner using tastytrade API + dxFeed Greeks.",
+        epilog="""
+Examples:
+  # Daily pre-market scan with quality filtering
+  python ff_tastytrade_scanner.py --tickers SPY QQQ AAPL --pairs 30-60 --min-ff 0.23 --csv-out scan.csv
+
+  # Scan for double calendars only
+  python ff_tastytrade_scanner.py --tickers SPY QQQ --pairs 60-90 --structure double --min-ff 0.20
+
+  # Scan both ATM and double calendars
+  python ff_tastytrade_scanner.py --tickers SPY --pairs 30-60 --structure both
+
+  # Allow trading through earnings (disable earnings filter)
+  python ff_tastytrade_scanner.py --tickers AAPL --pairs 30-90 --allow-earnings
+
+  # Force use of Greeks IV instead of X-earn IV
+  python ff_tastytrade_scanner.py --tickers QQQ --pairs 60-90 --force-greeks-iv
+        """,
+        formatter_class=argparse.RawDescriptionHelpFormatter
+    )
+
+    # Core scanner parameters
+    ap.add_argument("--tickers", nargs="+", required=True,
+                    help="List of underlyings (space or comma-separated). Example: SPY QQQ AAPL")
+    ap.add_argument("--pairs", nargs="+", required=True,
+                    help="DTE pairs (front-back). Example: 30-60 30-90 60-90")
+    ap.add_argument("--min-ff", type=float, default=0.20,
+                    help="Minimum FF ratio threshold (default: 0.20). Use 0.23 for ~20 trades/month.")
+    ap.add_argument("--dte-tolerance", type=int, default=5,
+                    help="Max deviation from target DTE in days (default: 5).")
+    ap.add_argument("--timeout", type=float, default=3.0,
+                    help="Greeks streaming timeout in seconds (default: 3.0).")
+
+    # Output options
+    ap.add_argument("--json-out", type=str, default="",
+                    help="Write results to JSON file.")
+    ap.add_argument("--csv-out", type=str, default="",
+                    help="Write results to CSV file (recommended).")
+    ap.add_argument("--sandbox", action="store_true",
+                    help="Use sandbox environment (limited market data).")
 
     # Earnings filtering flags
     ap.add_argument("--skip-earnings", dest="skip_earnings", action="store_true", default=True,
@@ -780,15 +858,33 @@ def main():
     ap.add_argument("--show-all-scans", action="store_true",
                     help="Show all scan results regardless of FF threshold (for data pipeline testing).")
 
-    # Double calendar flags
-    ap.add_argument("--double-calendar", action="store_true",
-                    help="Scan for double calendars at ±35Δ instead of ATM calendars.")
+    # Structure selection
+    ap.add_argument("--structure", type=str, default="both", choices=["atm-call", "double", "both"],
+                    help="Calendar structure: atm-call (ATM only), double (±35Δ only), or both (default: both).")
     ap.add_argument("--delta-tolerance", type=float, default=0.05,
-                    help="Delta tolerance for double calendars (default: 0.05 = ±5Δ).")
+                    help="Max delta deviation for double calendars (default: 0.05 = ±5Δ). Range: 0.01-0.10.")
 
     args = ap.parse_args()
     tickers = read_list_arg(args.tickers)
     pairs = parse_pairs(read_list_arg(args.pairs))
+
+    # Validate flag values
+    if args.min_liquidity_rating < 0 or args.min_liquidity_rating > 5:
+        print("ERROR: --min-liquidity-rating must be between 0 and 5", file=sys.stderr)
+        sys.exit(1)
+
+    if args.delta_tolerance < 0.01 or args.delta_tolerance > 0.10:
+        print("ERROR: --delta-tolerance must be between 0.01 and 0.10", file=sys.stderr)
+        sys.exit(1)
+
+    # Check for conflicting flags
+    if args.skip_earnings and args.allow_earnings:
+        print("ERROR: --skip-earnings and --allow-earnings are mutually exclusive", file=sys.stderr)
+        sys.exit(1)
+
+    if args.use_xearn_iv and args.force_greeks_iv:
+        print("ERROR: --use-xearn-iv and --force-greeks-iv are mutually exclusive", file=sys.stderr)
+        sys.exit(1)
 
     username = os.environ.get("TT_USERNAME", "").strip()
     password = os.environ.get("TT_PASSWORD", "").strip()
@@ -812,27 +908,21 @@ def main():
         use_xearn_iv=args.use_xearn_iv,
         force_greeks_iv=args.force_greeks_iv,
         show_all_scans=args.show_all_scans,
-        double_calendar=args.double_calendar,
+        structure=args.structure,
         delta_tolerance=args.delta_tolerance
     ))
 
-    # Print results
-    if args.double_calendar:
-        # Double calendar columns
-        cols = [
-            "symbol", "calendar_type", "front_target_dte", "front_exp", "front_dte",
-            "front_strike", "front_delta", "front_iv",
-            "back_target_dte", "back_exp", "back_dte",
-            "back_strike", "back_delta", "back_iv",
-            "fwd_iv", "ff_ratio", "iv_source",
-        ]
-    else:
-        # ATM calendar columns
-        cols = [
-            "symbol", "front_target_dte", "front_exp", "front_dte", "front_atm_strike", "front_atm_iv",
-            "back_target_dte", "back_exp", "back_dte", "back_atm_strike", "back_atm_iv",
-            "fwd_iv", "ff_ratio", "iv_source",
-        ]
+    # Unified 25-column CSV schema
+    cols = [
+        "timestamp", "symbol", "structure", "spot_price",
+        "front_dte", "back_dte", "front_expiry", "back_expiry",
+        "atm_strike", "call_strike", "put_strike", "call_delta", "put_delta",
+        "front_iv", "back_iv", "fwd_iv",
+        "ff", "call_ff", "put_ff", "combined_ff",
+        "earnings_date", "earnings_conflict",
+        "liquidity_rating", "liquidity_value",
+        "iv_source_front", "iv_source_back"
+    ]
 
     if not rows:
         print("No results passing filters.")

@@ -103,20 +103,33 @@ def pick_atm_strike(expiration_obj, spot: float) -> Tuple[float, str, str]:
         raise RuntimeError("No strikes found in expiration.")
     return best
 
-async def snapshot_greeks(session: Session, streamer_symbols: List[str], timeout_s: float = 3.0) -> Dict[str, Greeks]:
+async def snapshot_greeks(session: Session, streamer_symbols: List[str], timeout_s: float = 3.0) -> Dict[str, Tuple[float, float]]:
     """
     Subscribe to Greeks for `streamer_symbols` once and collect a single snapshot.
-    Returns a dict mapping event_symbol -> Greeks.
+
+    Args:
+        session: Active tastytrade session
+        streamer_symbols: List of dxFeed streamer symbols for options
+        timeout_s: Timeout in seconds for snapshot collection
+
+    Returns:
+        Dict mapping event_symbol -> (iv, delta) tuple
+        - iv: Implied volatility (decimal, e.g., 0.25 = 25%)
+        - delta: Option delta (decimal, e.g., 0.50 = 50 delta)
+        Both values may be None if unavailable.
+
+    Note:
+        Partial results are acceptable on timeout. Caller should handle missing data.
     """
-    results: Dict[str, Greeks] = {}
+    raw_results: Dict[str, Greeks] = {}
     async with DXLinkStreamer(session) as streamer:
         if streamer_symbols:
             await streamer.subscribe(Greeks, streamer_symbols)
 
             async def collector():
                 async for g in streamer.listen(Greeks):
-                    results[g.event_symbol] = g
-                    if len(results) >= len(streamer_symbols):
+                    raw_results[g.event_symbol] = g
+                    if len(raw_results) >= len(streamer_symbols):
                         break
 
             try:
@@ -124,6 +137,14 @@ async def snapshot_greeks(session: Session, streamer_symbols: List[str], timeout
             except asyncio.TimeoutError:
                 # partial results are okay; caller will decide how to handle
                 pass
+
+    # Extract (iv, delta) tuples from Greeks objects
+    results: Dict[str, Tuple[float, float]] = {}
+    for symbol, greeks in raw_results.items():
+        iv = float(greeks.volatility) if greeks.volatility is not None else None
+        delta = float(greeks.delta) if greeks.delta is not None else None
+        results[symbol] = (iv, delta)
+
     return results
 
 def forward_iv(iv_front: float, iv_back: float, dte_front: int, dte_back: int) -> Optional[float]:
@@ -257,12 +278,60 @@ def check_liquidity(
 
     return (True, None)
 
+def extract_xearn_iv(
+    metrics: Dict[str, any],
+    symbol: str,
+    expiration_date: date
+) -> Optional[float]:
+    """
+    Try to extract X-earn IV (earnings-removed implied volatility) from Market Metrics API.
+
+    Args:
+        metrics: Market metrics dict from fetch_market_metrics()
+        symbol: Ticker symbol (e.g., 'SPY')
+        expiration_date: Option expiration date to match
+
+    Returns:
+        X-earn IV as decimal (e.g., 0.25 = 25%) or None if unavailable
+
+    Note:
+        Falls back to None if:
+        - Symbol not in metrics
+        - option_expiration_implied_volatilities field missing
+        - Expiration date not found in the list
+        - IV value is None or invalid
+    """
+    if symbol not in metrics:
+        return None
+
+    metric_info = metrics[symbol]
+
+    # Try to get option_expiration_implied_volatilities field
+    iv_list = getattr(metric_info, 'option_expiration_implied_volatilities', None)
+    if iv_list is None or not isinstance(iv_list, list):
+        return None
+
+    # Search for matching expiration date
+    for iv_entry in iv_list:
+        # Expecting structure like: {'expiration_date': date(...), 'implied_volatility': 0.25}
+        entry_date = getattr(iv_entry, 'expiration_date', None)
+        if entry_date == expiration_date:
+            iv_value = getattr(iv_entry, 'implied_volatility', None)
+            if iv_value is not None:
+                try:
+                    return float(iv_value)
+                except (ValueError, TypeError):
+                    return None
+
+    return None
+
 # ---------- Main scan ----------
 
 async def scan(session: Session, tickers: List[str], pairs: List[Tuple[int, int]],
                min_ff: float, dte_tolerance: int, timeout_s: float,
                skip_earnings: bool = True, min_liquidity_rating: int = 3,
-               skip_liquidity_check: bool = False, show_earnings_conflicts: bool = False) -> List[dict]:
+               skip_liquidity_check: bool = False, show_earnings_conflicts: bool = False,
+               use_xearn_iv: bool = True, force_greeks_iv: bool = False) -> List[dict]:
     rows: List[dict] = []
     filtered_rows: List[dict] = []  # For --show-earnings-conflicts
     today = ny_today()
@@ -331,25 +400,51 @@ async def scan(session: Session, tickers: List[str], pairs: List[Tuple[int, int]
             print(f"[WARN] No expirations matched tolerance for {sym}", file=sys.stderr)
             continue
 
-        # 4) Snapshot Greeks (to get IV) for all needed ATM contracts
-        greek_map = await snapshot_greeks(session, streamer_syms, timeout_s=timeout_s)
-
-        # 5) Compute ATM IV per target DTE and then compute forward IV + FF for each pair
+        # 4) Try X-earn IV first (if enabled), then fall back to Greeks IV
         atm_iv_by_target: Dict[int, float] = {}
+        iv_source_by_target: Dict[int, str] = {}
 
-        for target, ch in choices.items():
-            call_iv = None
-            put_iv = None
-            if ch.call_streamer_symbol in greek_map:
-                call_iv = float(greek_map[ch.call_streamer_symbol].volatility or 0.0)
-            if ch.put_streamer_symbol in greek_map:
-                put_iv = float(greek_map[ch.put_streamer_symbol].volatility or 0.0)
+        # Try X-earn IV for each target DTE
+        if use_xearn_iv and not force_greeks_iv:
+            for target, ch in choices.items():
+                xearn_iv = extract_xearn_iv(market_metrics, sym, ch.expiration)
+                if xearn_iv is not None and xearn_iv > 0:
+                    atm_iv_by_target[target] = xearn_iv
+                    iv_source_by_target[target] = "xearn"
 
-            # If both present, average; if one present, use it.
-            ivs = [v for v in [call_iv, put_iv] if v and v > 0]
-            if not ivs:
-                continue
-            atm_iv_by_target[target] = sum(ivs) / len(ivs)
+        # For targets without X-earn IV, fall back to Greeks IV
+        targets_needing_greeks = [t for t in choices.keys() if t not in atm_iv_by_target]
+
+        if targets_needing_greeks or force_greeks_iv:
+            # Snapshot Greeks (to get IV and delta) for all needed ATM contracts
+            greek_map = await snapshot_greeks(session, streamer_syms, timeout_s=timeout_s)
+
+            for target, ch in choices.items():
+                # Skip if X-earn IV already available (unless force_greeks_iv)
+                if target in atm_iv_by_target and not force_greeks_iv:
+                    continue
+
+                call_iv = None
+                put_iv = None
+                # Unpack (iv, delta) tuples from greek_map
+                if ch.call_streamer_symbol in greek_map:
+                    iv, delta = greek_map[ch.call_streamer_symbol]
+                    call_iv = iv if iv is not None and iv > 0 else None
+                if ch.put_streamer_symbol in greek_map:
+                    iv, delta = greek_map[ch.put_streamer_symbol]
+                    put_iv = iv if iv is not None and iv > 0 else None
+
+                # If both present, average; if one present, use it.
+                ivs = [v for v in [call_iv, put_iv] if v and v > 0]
+                if ivs:
+                    atm_iv_by_target[target] = sum(ivs) / len(ivs)
+                    iv_source_by_target[target] = "greeks"
+
+        # Log X-earn IV fallback warnings
+        if use_xearn_iv and not force_greeks_iv:
+            for target in choices.keys():
+                if target not in iv_source_by_target or iv_source_by_target[target] == "greeks":
+                    print(f"[INFO] {sym} {target}DTE: X-earn IV unavailable, using Greeks IV", file=sys.stderr)
 
         # 6) Build rows for pairs
         for front, back in pairs:
@@ -370,6 +465,9 @@ async def scan(session: Session, tickers: List[str], pairs: List[Tuple[int, int]
             if ff is None:
                 continue
             if ff >= min_ff:
+                # Determine IV source for this pair (prefer front, fall back to back)
+                iv_src = iv_source_by_target.get(front, iv_source_by_target.get(back, "greeks"))
+
                 rows.append({
                     "symbol": sym,
                     "front_target_dte": front,
@@ -384,6 +482,7 @@ async def scan(session: Session, tickers: List[str], pairs: List[Tuple[int, int]
                     "back_atm_iv": round(iv_b, 6),
                     "fwd_iv": round(fwd, 6),
                     "ff_ratio": round(ff, 6),
+                    "iv_source": iv_src,
                 })
 
     # Sort by highest FF
@@ -422,6 +521,12 @@ def main():
     ap.add_argument("--skip-liquidity-check", action="store_true",
                     help="Disable liquidity filtering.")
 
+    # X-earn IV flags
+    ap.add_argument("--use-xearn-iv", dest="use_xearn_iv", action="store_true", default=True,
+                    help="Try to use X-earn IV from market metrics (default: True).")
+    ap.add_argument("--force-greeks-iv", action="store_true",
+                    help="Force use of Greeks IV instead of X-earn IV.")
+
     args = ap.parse_args()
     tickers = read_list_arg(args.tickers)
     pairs = parse_pairs(read_list_arg(args.pairs))
@@ -441,14 +546,16 @@ def main():
         skip_earnings=args.skip_earnings,
         min_liquidity_rating=args.min_liquidity_rating,
         skip_liquidity_check=args.skip_liquidity_check,
-        show_earnings_conflicts=args.show_earnings_conflicts
+        show_earnings_conflicts=args.show_earnings_conflicts,
+        use_xearn_iv=args.use_xearn_iv,
+        force_greeks_iv=args.force_greeks_iv
     ))
 
     # Print results
     cols = [
         "symbol", "front_target_dte", "front_exp", "front_dte", "front_atm_strike", "front_atm_iv",
         "back_target_dte", "back_exp", "back_dte", "back_atm_strike", "back_atm_iv",
-        "fwd_iv", "ff_ratio",
+        "fwd_iv", "ff_ratio", "iv_source",
     ]
 
     if not rows:

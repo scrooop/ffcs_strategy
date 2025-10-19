@@ -34,6 +34,7 @@ from typing import Dict, List, Tuple, Optional
 
 from tastytrade import Session, DXLinkStreamer
 from tastytrade.market_data import get_market_data
+from tastytrade.metrics import get_market_metrics
 from tastytrade.order import InstrumentType
 from tastytrade.instruments import NestedOptionChain
 from tastytrade.dxfeed import Greeks
@@ -143,12 +144,130 @@ def forward_iv(iv_front: float, iv_back: float, dte_front: int, dte_back: int) -
     except Exception:
         return None
 
+# ---------- Market Metrics & Filtering ----------
+
+def fetch_market_metrics(session: Session, symbols: List[str]) -> Dict[str, any]:
+    """
+    Batch fetch earnings and liquidity data for all symbols.
+
+    Args:
+        session: Active tastytrade session
+        symbols: List of ticker symbols (e.g., ['SPY', 'QQQ'])
+
+    Returns:
+        Dict mapping symbol → MarketMetricInfo (or None if fetch fails)
+
+    Note:
+        Returns empty dict on failure, logs error. Never crashes.
+    """
+    try:
+        metrics = get_market_metrics(session, symbols)
+        if not metrics:
+            return {}
+        # Convert list to dict for easy lookup
+        return {m.symbol: m for m in metrics if m.symbol}
+    except Exception as e:
+        print(f"[ERROR] Market metrics fetch failed: {e}", file=sys.stderr)
+        return {}
+
+def check_earnings_conflict(
+    symbol: str,
+    metrics: Dict[str, any],
+    back_expiry: date,
+    today: date
+) -> Tuple[bool, Optional[str]]:
+    """
+    Check if earnings date falls between today and back expiry (inclusive).
+
+    Args:
+        symbol: Ticker symbol
+        metrics: Dict from fetch_market_metrics()
+        back_expiry: Back leg expiration date
+        today: Current date (NY timezone)
+
+    Returns:
+        (passes, reason): (True, None) if no conflict or data unavailable,
+                          (False, reason_str) if earnings conflict detected
+    """
+    if symbol not in metrics:
+        # No metrics data - log warning but allow through
+        print(f"[WARN] {symbol}: Market metrics unavailable, skipping earnings check", file=sys.stderr)
+        return (True, None)
+
+    metric_info = metrics[symbol]
+
+    # Check if earnings_date attribute exists and is not None
+    earnings_date = getattr(metric_info, 'earnings_date', None)
+    if earnings_date is None:
+        print(f"[WARN] {symbol}: Earnings date unavailable, skipping earnings check", file=sys.stderr)
+        return (True, None)
+
+    # Convert to date if it's not already
+    if isinstance(earnings_date, str):
+        from datetime import datetime
+        earnings_date = datetime.fromisoformat(earnings_date.replace('Z', '+00:00')).date()
+
+    # Check if earnings falls in the window
+    if today <= earnings_date <= back_expiry:
+        reason = f"Earnings on {earnings_date} conflicts with back expiry {back_expiry}"
+        return (False, reason)
+
+    return (True, None)
+
+def check_liquidity(
+    symbol: str,
+    metrics: Dict[str, any],
+    min_rating: int
+) -> Tuple[bool, Optional[str]]:
+    """
+    Check if liquidity rating meets minimum threshold.
+
+    Args:
+        symbol: Ticker symbol
+        metrics: Dict from fetch_market_metrics()
+        min_rating: Minimum liquidity rating (0-5 scale)
+
+    Returns:
+        (passes, reason): (True, None) if passes or data unavailable,
+                          (False, reason_str) if below threshold
+    """
+    if symbol not in metrics:
+        print(f"[WARN] {symbol}: Market metrics unavailable, skipping liquidity check", file=sys.stderr)
+        return (True, None)
+
+    metric_info = metrics[symbol]
+
+    # Check if liquidity_rating attribute exists
+    liquidity_rating = getattr(metric_info, 'liquidity_rating', None)
+    if liquidity_rating is None:
+        print(f"[WARN] {symbol}: Liquidity rating unavailable, skipping liquidity check", file=sys.stderr)
+        return (True, None)
+
+    # Convert to int if needed
+    try:
+        rating = int(liquidity_rating)
+    except (ValueError, TypeError):
+        print(f"[WARN] {symbol}: Invalid liquidity rating format, skipping liquidity check", file=sys.stderr)
+        return (True, None)
+
+    if rating < min_rating:
+        reason = f"Liquidity rating {rating} < {min_rating}"
+        return (False, reason)
+
+    return (True, None)
+
 # ---------- Main scan ----------
 
 async def scan(session: Session, tickers: List[str], pairs: List[Tuple[int, int]],
-               min_ff: float, dte_tolerance: int, timeout_s: float) -> List[dict]:
+               min_ff: float, dte_tolerance: int, timeout_s: float,
+               skip_earnings: bool = True, min_liquidity_rating: int = 3,
+               skip_liquidity_check: bool = False, show_earnings_conflicts: bool = False) -> List[dict]:
     rows: List[dict] = []
+    filtered_rows: List[dict] = []  # For --show-earnings-conflicts
     today = ny_today()
+
+    # Fetch market metrics for all symbols upfront (batched)
+    market_metrics = fetch_market_metrics(session, tickers)
 
     for sym in tickers:
         # 1) Underlying spot
@@ -166,6 +285,26 @@ async def scan(session: Session, tickers: List[str], pairs: List[Tuple[int, int]
 
         # Pre-index expirations by date for fast lookup
         exp_by_date = {exp.expiration_date: exp for exp in chain.expirations}
+
+        # 2.5) Pre-filtering: Check earnings conflicts and liquidity
+        # Find the maximum back expiry date we'll need for this symbol
+        max_back_dte = max([back for _, back in pairs])
+        max_back_exp = nearest_expiration(chain, max_back_dte, dte_tolerance)
+
+        if max_back_exp and skip_earnings:
+            passes, reason = check_earnings_conflict(sym, market_metrics, max_back_exp, today)
+            if not passes:
+                print(f"[FILTERED] {sym}: {reason}", file=sys.stderr)
+                if show_earnings_conflicts:
+                    # Note: We'd compute FF here if we had the data, but skipping for simplicity
+                    filtered_rows.append({"symbol": sym, "reason": reason})
+                continue
+
+        if not skip_liquidity_check:
+            passes, reason = check_liquidity(sym, market_metrics, min_liquidity_rating)
+            if not passes:
+                print(f"[INFO] {sym}: {reason}, skipping", file=sys.stderr)
+                continue
 
         # 3) For each unique DTE in pairs, pick an expiration within tolerance and its ATM strike
         required_targets = sorted(set([t for pair in pairs for t in pair]))
@@ -268,6 +407,20 @@ def main():
     ap.add_argument("--json-out", type=str, default="", help="Optional path to write JSON results.")
     ap.add_argument("--csv-out", type=str, default="", help="Optional path to write CSV results.")
 
+    # Earnings filtering flags
+    ap.add_argument("--skip-earnings", dest="skip_earnings", action="store_true", default=True,
+                    help="Skip positions with earnings conflicts (default: True).")
+    ap.add_argument("--allow-earnings", dest="skip_earnings", action="store_false",
+                    help="Allow trading through earnings (overrides --skip-earnings).")
+    ap.add_argument("--show-earnings-conflicts", action="store_true",
+                    help="Show filtered positions due to earnings.")
+
+    # Liquidity filtering flags
+    ap.add_argument("--min-liquidity-rating", type=int, default=3,
+                    help="Minimum liquidity rating 0-5 (default: 3).")
+    ap.add_argument("--skip-liquidity-check", action="store_true",
+                    help="Disable liquidity filtering.")
+
     args = ap.parse_args()
     tickers = read_list_arg(args.tickers)
     pairs = parse_pairs(read_list_arg(args.pairs))
@@ -282,7 +435,13 @@ def main():
     session = Session(username, password=password, is_test=bool(args.sandbox))
 
     # Run scan
-    rows = asyncio.run(scan(session, tickers, pairs, args.min_ff, args.dte_tolerance, args.timeout))
+    rows = asyncio.run(scan(
+        session, tickers, pairs, args.min_ff, args.dte_tolerance, args.timeout,
+        skip_earnings=args.skip_earnings,
+        min_liquidity_rating=args.min_liquidity_rating,
+        skip_liquidity_check=args.skip_liquidity_check,
+        show_earnings_conflicts=args.show_earnings_conflicts
+    ))
 
     # Print results
     cols = [

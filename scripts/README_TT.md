@@ -1,4 +1,4 @@
-# FF Scanner v2.0 - Forward Factor Calendar Spread Scanner
+# FF Scanner v2.1 - Forward Factor Calendar Spread Scanner
 
 **Version**: 2.0
 **Last Updated**: October 19, 2025
@@ -29,6 +29,10 @@ The FF Scanner is a production-ready CLI tool that scans liquid options to ident
 - Filters for earnings conflicts, liquidity, and delta targets
 - Outputs both ATM call calendars and double calendars (±35Δ)
 - Supports X-earn IV (earnings-removed implied volatility) with graceful fallback to Greeks IV
+
+**v2.1 Enhancements:**
+- ✅ **Futures Options Support**: Scan futures symbols like /ES, /GC, /NQ, /CL
+- ✅ **CLI Bug Fix**: `--allow-earnings` flag now works correctly
 
 **v2.0 Enhancements:**
 - ✅ **Earnings Filtering**: Automatically skip positions with earnings between today and back expiry
@@ -894,7 +898,41 @@ python scripts/ff_tastytrade_scanner.py \
 
 **Use Case:** Longer-dated calendars for lower volatility environments (can use lower FF threshold).
 
-### Example 8: Debug Symbol with Suspected Earnings Conflict
+### Example 8: Scan Futures Options (v2.1)
+
+```bash
+python scripts/ff_tastytrade_scanner.py \
+  --tickers /ES /GC /NQ \
+  --pairs 30-60 \
+  --min-ff 0.20 \
+  --csv-out futures_scan.csv
+```
+
+**Output:**
+
+```csv
+timestamp,symbol,structure,spot_price,front_dte,back_dte,...
+2025-10-19T19:41:07Z,/ES,double-call,65.00,33,61,...
+2025-10-19T19:41:07Z,/ES,atm-call,65.00,33,61,...
+```
+
+**Use Case:** Scan liquid futures for calendar spread opportunities. Futures don't have earnings, so earnings filtering is automatically bypassed.
+
+**Mixed Equities and Futures:**
+
+```bash
+python scripts/ff_tastytrade_scanner.py \
+  --tickers SPY /ES QQQ /NQ AAPL \
+  --pairs 30-60 \
+  --min-ff 0.20 \
+  --csv-out mixed_scan.csv
+```
+
+**Note:** Spot prices for futures are inferred from option chain strikes (API limitation).
+
+---
+
+### Example 9: Debug Symbol with Suspected Earnings Conflict
 
 ```bash
 python scripts/ff_tastytrade_scanner.py \

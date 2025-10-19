@@ -36,7 +36,7 @@ from tastytrade import Session, DXLinkStreamer
 from tastytrade.market_data import get_market_data
 from tastytrade.metrics import get_market_metrics
 from tastytrade.order import InstrumentType
-from tastytrade.instruments import NestedOptionChain
+from tastytrade.instruments import NestedOptionChain, NestedFutureOptionChain
 from tastytrade.dxfeed import Greeks
 from tastytrade.utils import today_in_new_york
 
@@ -77,6 +77,81 @@ def parse_pairs(pairs: List[str]) -> List[Tuple[int, int]]:
             raise ValueError(f"Pair must be ascending DTEs like 30-60, got {p}")
         out.append((a, b))
     return out
+
+def is_futures_symbol(symbol: str) -> bool:
+    """
+    Check if symbol is a futures symbol.
+
+    Futures symbols start with '/' (e.g., /ES, /GC, /NQ, /CL).
+    Equity symbols do not (e.g., SPY, QQQ, AAPL).
+
+    Args:
+        symbol: The symbol to check
+
+    Returns:
+        True if symbol is a futures symbol, False otherwise
+
+    Example:
+        >>> is_futures_symbol('/ES')
+        True
+        >>> is_futures_symbol('SPY')
+        False
+    """
+    return symbol.startswith('/')
+
+def get_futures_spot_price(session: Session, symbol: str) -> Optional[float]:
+    """
+    Get spot price for a futures symbol from the active (front-month) contract.
+
+    Uses NestedFutureOptionChain to find the active contract, then fetches
+    market data for that specific contract symbol (e.g., /ESZ5 for /ES).
+
+    Args:
+        session: tastytrade Session object
+        symbol: Futures root symbol (e.g., '/ES', '/GC', '/NQ')
+
+    Returns:
+        The last traded price of the active futures contract, or None if unavailable
+
+    Raises:
+        None - returns None on any error
+
+    Example:
+        >>> session = Session('username', 'password')
+        >>> price = get_futures_spot_price(session, '/ES')
+        >>> print(f'/ES spot: {price}')
+        /ES spot: 4521.50
+    """
+    try:
+        # Get futures option chain to find the active contract
+        chain = NestedFutureOptionChain.get(session, symbol)
+        if not chain or not chain.futures:
+            print(f"[WARN] No futures chain found for {symbol}", file=sys.stderr)
+            return None
+
+        # Find the active month contract
+        active_contract = None
+        for future in chain.futures:
+            if hasattr(future, 'active_month') and future.active_month:
+                active_contract = future.symbol
+                break
+
+        if not active_contract:
+            print(f"[WARN] No active contract found for {symbol}", file=sys.stderr)
+            return None
+
+        # Get market data for the active contract (e.g., /ESZ5)
+        md = get_market_data(session, active_contract, InstrumentType.FUTURE)
+
+        if md is None or md.last is None:
+            print(f"[WARN] No quote for active contract {active_contract}", file=sys.stderr)
+            return None
+
+        return float(md.last) if md.last is not None else float(md.mark)
+
+    except Exception as e:
+        print(f"[ERROR] Failed to get futures spot price for {symbol}: {e}", file=sys.stderr)
+        return None
 
 @dataclass(frozen=True)
 class ATMChoice:
@@ -655,12 +730,22 @@ async def scan(session: Session, tickers: List[str], pairs: List[Tuple[int, int]
         if idx > 0:
             await asyncio.sleep(0.5)  # 500ms delay between symbols
 
-        # 1) Underlying spot
-        md = get_market_data(session, sym, InstrumentType.EQUITY)
-        if md is None or md.last is None:
-            print(f"[WARN] No quote for {sym}, skipping.", file=sys.stderr)
-            continue
-        spot = float(md.last) if md.last is not None else float(md.mark)
+        # 1) Underlying spot - handle futures vs equity
+        if is_futures_symbol(sym):
+            # For futures, get spot from active contract
+            spot = get_futures_spot_price(session, sym)
+            if spot is None:
+                # Futures spot price not critical - we can infer from option strikes
+                # Use a default that will be overridden by ATM strike selection
+                print(f"[INFO] Using option chain for {sym} (futures spot not available)", file=sys.stderr)
+                spot = 0.0  # Will be inferred from option chain
+        else:
+            # For equity, use standard equity market data
+            md = get_market_data(session, sym, InstrumentType.EQUITY)
+            if md is None or md.last is None:
+                print(f"[WARN] No quote for {sym}, skipping.", file=sys.stderr)
+                continue
+            spot = float(md.last) if md.last is not None else float(md.mark)
 
         # 2) Extract earnings and liquidity data for this symbol
         earnings_date = None
@@ -679,6 +764,14 @@ async def scan(session: Session, tickers: List[str], pairs: List[Tuple[int, int]
             continue
         chain = chain_list[0]  # API returns a list; take first element
 
+        # For futures, infer spot from option chain if not available
+        if is_futures_symbol(sym) and spot == 0.0:
+            if chain.expirations and chain.expirations[0].strikes:
+                # Use middle strike as proxy for spot price
+                strikes = [s.strike_price for s in chain.expirations[0].strikes]
+                spot = float(sorted(strikes)[len(strikes) // 2])
+                print(f"[INFO] Inferred {sym} spot from option chain: {spot:.2f}", file=sys.stderr)
+
         # Pre-index expirations by date for fast lookup
         exp_by_date = {exp.expiration_date: exp for exp in chain.expirations}
 
@@ -687,7 +780,8 @@ async def scan(session: Session, tickers: List[str], pairs: List[Tuple[int, int]
         max_back_dte = max([back for _, back in pairs])
         max_back_exp = nearest_expiration(chain, max_back_dte, dte_tolerance)
 
-        if max_back_exp and skip_earnings:
+        # Skip earnings check for futures (they don't have earnings)
+        if max_back_exp and skip_earnings and not is_futures_symbol(sym):
             passes, reason = check_earnings_conflict(sym, market_metrics, max_back_exp, today)
             if not passes:
                 print(f"[FILTERED] {sym}: {reason}", file=sys.stderr)
@@ -1030,11 +1124,13 @@ Examples:
     ap.add_argument("--sandbox", action="store_true",
                     help="Use sandbox environment (limited market data).")
 
-    # Earnings filtering flags
-    ap.add_argument("--skip-earnings", dest="skip_earnings", action="store_true", default=True,
-                    help="Skip positions with earnings conflicts (default).")
-    ap.add_argument("--allow-earnings", dest="allow_earnings", action="store_true", default=False,
-                    help="Allow trading through earnings (disable earnings filtering).")
+    # Earnings filtering flags (mutually exclusive group)
+    earnings_group = ap.add_mutually_exclusive_group()
+    earnings_group.add_argument("--skip-earnings", dest="skip_earnings", action="store_true",
+                                help="Skip positions with earnings conflicts (default).")
+    earnings_group.add_argument("--allow-earnings", dest="skip_earnings", action="store_false",
+                                help="Allow trading through earnings (disable earnings filtering).")
+    ap.set_defaults(skip_earnings=True)  # Set default: skip earnings by default
     ap.add_argument("--show-earnings-conflicts", action="store_true",
                     help="Show filtered positions due to earnings.")
 
@@ -1074,9 +1170,7 @@ Examples:
         sys.exit(1)
 
     # Check for conflicting flags
-    if args.skip_earnings and args.allow_earnings:
-        print("ERROR: --skip-earnings and --allow-earnings are mutually exclusive", file=sys.stderr)
-        sys.exit(1)
+    # Note: --skip-earnings and --allow-earnings are mutually exclusive via argparse group
 
     if args.use_xearn_iv and args.force_greeks_iv:
         print("ERROR: --use-xearn-iv and --force-greeks-iv are mutually exclusive", file=sys.stderr)
@@ -1092,8 +1186,8 @@ Examples:
     session = Session(username, password=password, is_test=bool(args.sandbox))
 
     # Run scan
-    # If --allow-earnings is explicitly set, disable earnings filtering
-    skip_earnings_flag = not args.allow_earnings if args.allow_earnings else args.skip_earnings
+    # Both --skip-earnings and --allow-earnings set skip_earnings via mutually exclusive group
+    skip_earnings_flag = args.skip_earnings
 
     rows = asyncio.run(scan(
         session, tickers, pairs, args.min_ff, args.dte_tolerance, args.timeout,

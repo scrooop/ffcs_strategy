@@ -329,9 +329,40 @@ This is the correct formula as defined in the video transcript and implemented i
 2. **Double-Calendar** (higher win rate, more complex)
    - +35Δ call calendar AND -35Δ put calendar (±5Δ acceptable)
 
+## Futures Options Support (v2.1)
+
+The scanner now supports futures options (e.g., /ES, /GC, /NQ, /CL) in addition to equity options.
+
+**Key Differences:**
+- Futures symbols start with `/` (e.g., `/ES`, not `ES`)
+- Earnings filter automatically bypassed (futures don't have earnings)
+- Spot price inferred from option chain strikes (API limitation)
+- `--allow-earnings` flag fixed and working for both equities and futures
+
+**Usage:**
+```bash
+# Scan futures only
+python scripts/ff_tastytrade_scanner.py \
+  --tickers /ES /GC /NQ \
+  --pairs 30-60 \
+  --min-ff 0.20
+
+# Mixed equities and futures
+python scripts/ff_tastytrade_scanner.py \
+  --tickers SPY /ES QQQ /NQ \
+  --pairs 30-60 \
+  --min-ff 0.20
+```
+
+**Limitations:**
+- Spot price accuracy: Inferred from middle strike (API doesn't provide futures spot directly)
+- Liquidity metrics for futures may differ from equities
+- Requires futures options trading approval on your account
+
 ## Future Enhancements
 
 Scanner could be extended with:
+- **Futures options support** (/ES, /GC, /NQ, /CL) - Investigation complete, implementation pending
 - Bid-ask spread quality checks (tighter filtering beyond liquidity rating)
 - Position tracking and P&L monitoring (track open positions)
 - Auto-execution via tastytrade order API (automated order placement)

@@ -196,16 +196,17 @@ def check_earnings_conflict(
 
     metric_info = metrics[symbol]
 
-    # Check if earnings_date attribute exists and is not None
-    earnings_date = getattr(metric_info, 'earnings_date', None)
+    # Check if earnings attribute exists
+    earnings = getattr(metric_info, 'earnings', None)
+    if earnings is None:
+        print(f"[WARN] {symbol}: Earnings data unavailable, skipping earnings check", file=sys.stderr)
+        return (True, None)
+
+    # Get expected_report_date from earnings object
+    earnings_date = getattr(earnings, 'expected_report_date', None)
     if earnings_date is None:
         print(f"[WARN] {symbol}: Earnings date unavailable, skipping earnings check", file=sys.stderr)
         return (True, None)
-
-    # Convert to date if it's not already
-    if isinstance(earnings_date, str):
-        from datetime import datetime
-        earnings_date = datetime.fromisoformat(earnings_date.replace('Z', '+00:00')).date()
 
     # Check if earnings falls in the window
     if today <= earnings_date <= back_expiry:

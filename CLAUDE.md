@@ -12,6 +12,8 @@ This is a **Forward Factor (FF) Calendar Spread** trading strategy implementatio
 - Trade calendar spreads when FF exceeds threshold (typically 0.20-0.23)
 - Hold until front expiry, then close entire spread
 
+**Version:** 2.0 - Enhanced quality filtering with earnings detection, liquidity screening, X-earn IV support, and double calendar structures
+
 ## Repository Structure
 
 ```
@@ -29,7 +31,7 @@ ffcs_strategy/
 
 ### ff_tastytrade_scanner.py
 
-**Purpose:** CLI scanner that fetches ATM implied volatilities from tastytrade's dxFeed streamer, computes forward IV and FF ratios, and reports tradable opportunities.
+**Purpose:** CLI scanner that fetches implied volatilities from tastytrade's dxFeed streamer, computes forward IV and FF ratios, and reports tradable opportunities for both ATM and double calendar spreads.
 
 **Key Components:**
 
@@ -37,11 +39,14 @@ ffcs_strategy/
    - Requires `TT_USERNAME` and `TT_PASSWORD` environment variables
    - Production environment required for live Greeks data (sandbox has limited market data)
 
-2. **Data Pipeline:**
+2. **Data Pipeline (v2.0):**
+   - `fetch_market_metrics()` → batch fetch earnings dates + liquidity ratings for all symbols
+   - Earnings/liquidity pre-filtering → skip symbols that don't meet quality thresholds
    - `get_market_data()` → underlying spot price
    - `NestedOptionChain.get()` → expirations & strikes with streamer symbols
-   - `snapshot_greeks()` → async dxFeed Greeks snapshot for ATM IV
-   - Greeks.volatility = Black-Scholes IV per contract (average ATM call & put)
+   - `extract_xearn_iv()` → try X-earn IV (earnings-removed) from market metrics, fallback to Greeks IV
+   - `snapshot_greeks()` → async dxFeed Greeks snapshot for IV + delta
+   - Structure-based scanning: ATM-only, double calendar (±35Δ), or both
 
 3. **Forward IV Calculation:**
    ```python
@@ -56,12 +61,19 @@ ffcs_strategy/
 4. **Expiration Matching:**
    - `nearest_expiration()` picks closest expiration to target DTE within tolerance (default ±5 days)
    - Common pairs: 30-60, 30-90, 60-90 DTE
-   - Uses `pick_atm_strike()` to find strike nearest to spot
+   - ATM: Uses `pick_atm_strike()` to find strike nearest to spot
+   - Double calendar: Uses `pick_delta_strike()` to find ±35Δ strikes within tolerance
 
 5. **Greeks Streaming:**
    - `snapshot_greeks()` subscribes to dxFeed Greeks via DXLinkStreamer
-   - Collects single snapshot with timeout (default 3s)
+   - Collects (IV, delta) tuples for each strike with timeout (default 3s)
    - Handles partial results if some legs fail to arrive
+
+6. **Quality Filtering (v2.0):**
+   - **Earnings detection:** Skip symbols with earnings between today and back expiry (default: enabled)
+   - **Liquidity screening:** Filter symbols by liquidity rating 0-5 (default: ≥3)
+   - **X-earn IV support:** Prefer earnings-removed IV when available, graceful fallback to Greeks IV
+   - **Delta tolerance:** Control strike selection precision for double calendars (default: ±5Δ)
 
 ## Running the Scanner
 
@@ -79,37 +91,154 @@ export TT_PASSWORD="your_password"
 ### Basic Usage
 
 ```bash
-# Scan SPY and QQQ for multiple DTE pairs (using general threshold)
-python scripts/ff_tastytrade_scanner.py \
-  --tickers SPY QQQ \
-  --pairs 30-60 30-90 60-90 \
-  --min-ff 0.20 \
-  --csv-out ff_scan.csv
-
-# Use optimized threshold for 30-60 DTE (~20 trades/month)
+# Daily pre-market scan with quality filtering (ATM + double calendars)
 python scripts/ff_tastytrade_scanner.py \
   --tickers SPY QQQ AAPL TSLA NVDA META AMZN \
   --pairs 30-60 \
   --min-ff 0.23 \
-  --dte-tolerance 7
+  --csv-out scan.csv
 
-# Lower threshold to see more opportunities (returns start positive around 0.10-0.20)
+# Scan both ATM and double calendar structures
+python scripts/ff_tastytrade_scanner.py \
+  --tickers SPY QQQ \
+  --pairs 30-60 30-90 60-90 \
+  --structure both \
+  --min-ff 0.20 \
+  --csv-out ff_scan.csv
+
+# Scan double calendars only (±35Δ call and put)
 python scripts/ff_tastytrade_scanner.py \
   --tickers SPY QQQ \
   --pairs 60-90 \
-  --min-ff 0.15
+  --structure double \
+  --min-ff 0.20
+
+# Allow trading through earnings (disable earnings filter)
+python scripts/ff_tastytrade_scanner.py \
+  --tickers AAPL \
+  --pairs 30-90 \
+  --allow-earnings \
+  --min-ff 0.23
+
+# See what was filtered due to earnings
+python scripts/ff_tastytrade_scanner.py \
+  --tickers SPY QQQ AAPL TSLA NVDA \
+  --pairs 30-60 \
+  --show-earnings-conflicts
+
+# Force use of Greeks IV instead of X-earn IV
+python scripts/ff_tastytrade_scanner.py \
+  --tickers QQQ \
+  --pairs 60-90 \
+  --force-greeks-iv
+
+# Adjust delta tolerance for double calendars (tighter selection)
+python scripts/ff_tastytrade_scanner.py \
+  --tickers SPY \
+  --pairs 30-60 \
+  --structure double \
+  --delta-tolerance 0.03
 ```
 
 ### Command Line Flags
 
+**Core Parameters:**
 - `--tickers`: Space or comma-separated symbols (required)
 - `--pairs`: DTE pairs like `30-60 30-90` (front-back, required)
 - `--min-ff`: Minimum FF ratio to include (default 0.20)
 - `--dte-tolerance`: Max deviation from target DTE (default 5 days)
 - `--timeout`: Streamer snapshot timeout in seconds (default 3s)
-- `--sandbox`: Use sandbox environment (production required for live Greeks)
-- `--csv-out`: Write results to CSV file
+
+**Structure Selection:**
+- `--structure {atm-call,double,both}`: Calendar structure type (default: both)
+  - `atm-call`: ATM call calendars only
+  - `double`: Double calendars (±35Δ call and put) only
+  - `both`: Scan both structures (recommended)
+- `--delta-tolerance`: Max delta deviation for double calendars (default: 0.05 = ±5Δ, range: 0.01-0.10)
+
+**Earnings Filtering:**
+- `--skip-earnings`: Skip positions with earnings conflicts (default: enabled)
+- `--allow-earnings`: Allow trading through earnings (disable earnings filtering)
+- `--show-earnings-conflicts`: Show filtered positions due to earnings
+
+**Liquidity Screening:**
+- `--min-liquidity-rating`: Minimum liquidity rating 0-5 (default: 3)
+- `--skip-liquidity-check`: Disable liquidity filtering
+
+**IV Data Source:**
+- `--use-xearn-iv`: Try to use X-earn IV from market metrics (default: enabled)
+- `--force-greeks-iv`: Force use of Greeks IV instead of X-earn IV
+
+**Output Options:**
+- `--csv-out`: Write results to CSV file (recommended, 25-column schema)
 - `--json-out`: Write results to JSON file
+- `--sandbox`: Use sandbox environment (production required for live Greeks)
+- `--show-all-scans`: Show all scan results regardless of FF threshold (for testing)
+
+## v2.0 Features
+
+### Quality Filtering Thresholds
+
+**Earnings Detection:**
+- Default: Skip symbols with earnings between today and back expiry
+- Threshold: Any earnings date that falls between today and back expiration (inclusive)
+- Override: Use `--allow-earnings` to disable filtering
+- Debugging: Use `--show-earnings-conflicts` to see filtered opportunities
+
+**Liquidity Screening:**
+- Default: Minimum liquidity rating of 3 (scale 0-5)
+- Rating 3 ≈ ~10k contracts/day average option volume
+- Rating 5 = highest liquidity (SPY, QQQ, AAPL, etc.)
+- Override: Use `--skip-liquidity-check` to disable filtering
+
+**Delta Tolerance (Double Calendars):**
+- Target: ±35Δ strikes (0.35 call delta, -0.35 put delta)
+- Default tolerance: ±5Δ (0.05)
+- Range: 0.01 to 0.10 (tighter to looser selection)
+- Tighter tolerance (0.03): More precise strikes, may skip symbols
+- Looser tolerance (0.10): More opportunities, less precise deltas
+
+### X-earn IV Implementation
+
+**What is X-earn IV:**
+- Earnings-removed implied volatility from tastytrade Market Metrics API
+- More accurate forward IV when earnings are embedded in option prices
+- Automatically tried when available, falls back to Greeks IV if missing
+
+**How It Works:**
+1. Scanner first attempts to fetch X-earn IV from `option_expiration_implied_volatilities` field
+2. If unavailable or expiration not found, gracefully falls back to dxFeed Greeks IV
+3. CSV output includes `iv_source_front` and `iv_source_back` columns to track data source
+4. Source values: "xearn" (X-earn IV used) or "greeks" (dxFeed Greeks IV used)
+
+**Override Behavior:**
+- Default: `--use-xearn-iv` (try X-earn IV, fallback to Greeks IV)
+- `--force-greeks-iv`: Always use Greeks IV, never attempt X-earn IV
+
+### CSV Output Schema (25 Columns)
+
+Results are sorted by `combined_ff` descending (highest opportunities first).
+
+**Columns:**
+- `timestamp`: ISO 8601 UTC timestamp (e.g., "2025-10-19T14:30:00Z")
+- `symbol`: Ticker symbol
+- `structure`: "ATM" or "DOUBLE"
+- `spot_price`: Current underlying price
+- `front_dte`, `back_dte`: Days to expiration
+- `front_expiry`, `back_expiry`: Expiration dates (YYYY-MM-DD)
+- `atm_strike`: ATM strike (for ATM structure, null for DOUBLE)
+- `call_strike`, `put_strike`: Strikes for double calendar (null for ATM structure)
+- `call_delta`, `put_delta`: Delta values for double calendar legs
+- `front_iv`, `back_iv`: Front and back IVs (decimal format: 0.25 = 25%)
+- `fwd_iv`: Computed forward IV
+- `ff`: Forward factor for ATM structure
+- `call_ff`, `put_ff`: Forward factors for call and put legs (double calendar)
+- `combined_ff`: Average of call_ff and put_ff (used for sorting)
+- `earnings_date`: Next earnings date (YYYY-MM-DD, null if none)
+- `earnings_conflict`: Boolean indicating earnings conflict
+- `liquidity_rating`: Liquidity rating 0-5
+- `liquidity_value`: Numeric liquidity metric
+- `iv_source_front`, `iv_source_back`: "xearn" or "greeks"
 
 ## Strategy Implementation Notes
 
@@ -158,16 +287,25 @@ python scripts/ff_tastytrade_scanner.py \
 - If only one leg (call or put) IV arrives, scanner uses that single value
 - If both legs fail to arrive within timeout, that target DTE is skipped
 - Greeks.volatility is Black-Scholes IV (annualized, decimal format: 0.25 = 25%)
+- X-earn IV gracefully falls back to Greeks IV if unavailable (see CSV `iv_source` columns)
 
-### Earnings Considerations
-- Scanner does NOT currently filter for earnings
-- SOP requires: no earnings between today and back expiry, OR use ex-earnings IV
-- Future enhancement: add earnings date filtering via tastytrade API
+### Earnings Filtering (v2.0)
+- **Now automated:** Scanner fetches earnings dates and filters conflicts by default
+- Threshold: Any earnings between today and back expiry (inclusive)
+- Override: Use `--allow-earnings` to disable filtering
+- Debugging: Use `--show-earnings-conflicts` to see what was filtered
 
-### Liquidity Filters
-- SOP recommends: 20-day avg option volume > 10k contracts/day
-- Scanner does NOT currently enforce liquidity filters
-- Future enhancement: add volume/OI checks
+### Liquidity Screening (v2.0)
+- **Now automated:** Scanner filters by liquidity rating (0-5 scale)
+- Default: Rating ≥3 (≈10k contracts/day avg volume)
+- Override: Use `--skip-liquidity-check` to disable filtering
+- Rating 5 = highest liquidity (SPY, QQQ, AAPL, etc.)
+
+### Double Calendar Strike Selection (v2.0)
+- Target: ±35Δ strikes with configurable tolerance
+- If no strikes within tolerance, symbol is skipped for double calendar structure
+- ATM structure still scanned if `--structure both` (default)
+- Adjust `--delta-tolerance` if too many symbols are skipped
 
 ## Strategy Theory (from SOP)
 
@@ -194,12 +332,12 @@ This is the correct formula as defined in the video transcript and implemented i
 ## Future Enhancements
 
 Scanner could be extended with:
-- Earnings date filtering (exclude or flag positions spanning earnings)
-- Liquidity screens (avg option volume, open interest thresholds)
-- Bid-ask spread quality checks
-- Position tracking and P&L monitoring
-- Auto-execution via tastytrade order API
-- Backtest framework using historical IV data
+- Bid-ask spread quality checks (tighter filtering beyond liquidity rating)
+- Position tracking and P&L monitoring (track open positions)
+- Auto-execution via tastytrade order API (automated order placement)
+- Backtest framework using historical IV data (strategy validation)
+- Iron condor / iron butterfly structures (additional strategies)
+- Multi-threaded scanning for 50+ symbols (performance optimization)
 
 ## Documentation and Resources
 

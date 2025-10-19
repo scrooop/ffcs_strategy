@@ -165,6 +165,137 @@ def forward_iv(iv_front: float, iv_back: float, dte_front: int, dte_back: int) -
     except Exception:
         return None
 
+# ---------- Double Calendar Strike Selection ----------
+
+@dataclass(frozen=True)
+class DeltaStrikeChoice:
+    """Represents a strike selected by delta for double calendars."""
+    strike: float
+    streamer_symbol: str
+    actual_delta: float
+    iv: float
+
+def pick_delta_strike(
+    expiration_obj,
+    greeks_map: Dict[str, Tuple[float, float]],
+    target_delta: float,
+    delta_tolerance: float = 0.05,
+    option_type: str = "call"
+) -> Optional[DeltaStrikeChoice]:
+    """
+    From a NestedOptionChain expiration, choose the strike closest to target delta.
+
+    Args:
+        expiration_obj: NestedOptionChain expiration object with strikes
+        greeks_map: Dict mapping streamer_symbol → (iv, delta) tuples
+        target_delta: Target delta (e.g., 0.35 for +35Δ call, -0.35 for -35Δ put)
+        delta_tolerance: Maximum deviation from target delta (default 0.05 = ±5Δ)
+        option_type: "call" or "put"
+
+    Returns:
+        DeltaStrikeChoice or None if no strike within tolerance
+    """
+    best = None
+    best_err = None
+
+    for s in expiration_obj.strikes:
+        strike = float(s.strike_price)
+        symbol = s.call_streamer_symbol if option_type == "call" else s.put_streamer_symbol
+
+        if symbol not in greeks_map:
+            continue
+
+        iv, delta = greeks_map[symbol]
+        if delta is None or iv is None:
+            continue
+
+        err = abs(delta - target_delta)
+
+        if err <= delta_tolerance and (best_err is None or err < best_err):
+            best_err = err
+            best = DeltaStrikeChoice(
+                strike=strike,
+                streamer_symbol=symbol,
+                actual_delta=delta,
+                iv=iv
+            )
+
+    return best
+
+async def snapshot_greeks_for_range(
+    session: Session,
+    expiration_obj,
+    spot: float,
+    range_pct: float = 0.25,
+    timeout_s: float = 5.0
+) -> Dict[str, Tuple[float, float]]:
+    """
+    Fetch Greeks for a range of strikes around spot price.
+
+    Args:
+        session: tastytrade Session
+        expiration_obj: NestedOptionChain expiration object
+        spot: Current underlying spot price
+        range_pct: Percentage range around spot (default 0.25 = ±25%)
+        timeout_s: Timeout for Greeks snapshot
+
+    Returns:
+        Dict mapping streamer_symbol → (iv, delta) for all strikes in range
+    """
+    lower_bound = spot * (1 - range_pct)
+    upper_bound = spot * (1 + range_pct)
+
+    streamer_symbols: List[str] = []
+    for s in expiration_obj.strikes:
+        strike = float(s.strike_price)
+        if lower_bound <= strike <= upper_bound:
+            streamer_symbols.extend([s.call_streamer_symbol, s.put_streamer_symbol])
+
+    if not streamer_symbols:
+        return {}
+
+    return await snapshot_greeks(session, streamer_symbols, timeout_s=timeout_s)
+
+async def get_double_calendar_strikes(
+    session: Session,
+    expiration_obj,
+    spot: float,
+    call_target_delta: float = 0.35,
+    put_target_delta: float = -0.35,
+    delta_tolerance: float = 0.05,
+    timeout_s: float = 5.0
+) -> Dict[str, Optional[DeltaStrikeChoice]]:
+    """
+    Get both ±35Δ strikes for a double calendar spread.
+
+    Args:
+        session: tastytrade Session
+        expiration_obj: NestedOptionChain expiration object
+        spot: Current underlying spot price
+        call_target_delta: Target delta for call leg (default 0.35 = +35Δ)
+        put_target_delta: Target delta for put leg (default -0.35 = -35Δ)
+        delta_tolerance: Maximum deviation from target delta (default 0.05 = ±5Δ)
+        timeout_s: Timeout for Greeks snapshot
+
+    Returns:
+        Dict with keys "call_35delta" and "put_35delta", values are DeltaStrikeChoice or None
+    """
+    # Fetch Greeks for a wide range of strikes
+    greeks_map = await snapshot_greeks_for_range(session, expiration_obj, spot, timeout_s=timeout_s)
+
+    # Find strikes matching target deltas
+    call_strike = pick_delta_strike(
+        expiration_obj, greeks_map, call_target_delta, delta_tolerance, "call"
+    )
+    put_strike = pick_delta_strike(
+        expiration_obj, greeks_map, put_target_delta, delta_tolerance, "put"
+    )
+
+    return {
+        "call_35delta": call_strike,
+        "put_35delta": put_strike
+    }
+
 # ---------- Market Metrics & Filtering ----------
 
 def fetch_market_metrics(session: Session, symbols: List[str]) -> Dict[str, any]:
@@ -332,7 +463,8 @@ async def scan(session: Session, tickers: List[str], pairs: List[Tuple[int, int]
                skip_earnings: bool = True, min_liquidity_rating: int = 3,
                skip_liquidity_check: bool = False, show_earnings_conflicts: bool = False,
                use_xearn_iv: bool = True, force_greeks_iv: bool = False,
-               show_all_scans: bool = False) -> List[dict]:
+               show_all_scans: bool = False, double_calendar: bool = False,
+               delta_tolerance: float = 0.05) -> List[dict]:
     rows: List[dict] = []
     filtered_rows: List[dict] = []  # For --show-earnings-conflicts
     today = ny_today()
@@ -381,116 +513,226 @@ async def scan(session: Session, tickers: List[str], pairs: List[Tuple[int, int]
                 print(f"[INFO] {sym}: {reason}, skipping", file=sys.stderr)
                 continue
 
-        # 3) For each unique DTE in pairs, pick an expiration within tolerance and its ATM strike
+        # 3) Branch based on calendar structure mode
         required_targets = sorted(set([t for pair in pairs for t in pair]))
-        choices: Dict[int, ATMChoice] = {}
-        streamer_syms: List[str] = []
 
-        for target in required_targets:
-            exp_date = nearest_expiration(chain, target, dte_tolerance)
-            if exp_date is None:
+        if double_calendar:
+            # ========== DOUBLE CALENDAR MODE ==========
+            # Get ±35Δ strikes for each target DTE
+            delta_choices: Dict[int, Dict] = {}
+
+            for target in required_targets:
+                exp_date = nearest_expiration(chain, target, dte_tolerance)
+                if exp_date is None:
+                    continue
+                exp_obj = exp_by_date[exp_date]
+
+                # Get ±35Δ strikes
+                delta_strikes = await get_double_calendar_strikes(
+                    session=session,
+                    expiration_obj=exp_obj,
+                    spot=spot,
+                    call_target_delta=0.35,
+                    put_target_delta=-0.35,
+                    delta_tolerance=delta_tolerance,
+                    timeout_s=timeout_s
+                )
+
+                # Store with expiration info
+                delta_choices[target] = {
+                    "expiration": exp_date,
+                    "dte": dte(exp_date, today),
+                    "call_35delta": delta_strikes["call_35delta"],
+                    "put_35delta": delta_strikes["put_35delta"]
+                }
+
+            if not delta_choices:
+                print(f"[WARN] No expirations matched tolerance for {sym}", file=sys.stderr)
                 continue
-            exp_obj = exp_by_date[exp_date]
-            strike, call_sym, put_sym = pick_atm_strike(exp_obj, spot)
-            choices[target] = ATMChoice(
-                expiration=exp_date,
-                strike=strike,
-                call_streamer_symbol=call_sym,
-                put_streamer_symbol=put_sym,
-                dte=dte(exp_date, today),
-            )
-            streamer_syms.extend([call_sym, put_sym])
 
-        if not choices:
-            print(f"[WARN] No expirations matched tolerance for {sym}", file=sys.stderr)
-            continue
-
-        # 4) Try X-earn IV first (if enabled), then fall back to Greeks IV
-        atm_iv_by_target: Dict[int, float] = {}
-        iv_source_by_target: Dict[int, str] = {}
-
-        # Try X-earn IV for each target DTE
-        if use_xearn_iv and not force_greeks_iv:
-            for target, ch in choices.items():
-                xearn_iv = extract_xearn_iv(market_metrics, sym, ch.expiration)
-                if xearn_iv is not None and xearn_iv > 0:
-                    atm_iv_by_target[target] = xearn_iv
-                    iv_source_by_target[target] = "xearn"
-
-        # For targets without X-earn IV, fall back to Greeks IV
-        targets_needing_greeks = [t for t in choices.keys() if t not in atm_iv_by_target]
-
-        if targets_needing_greeks or force_greeks_iv:
-            # Snapshot Greeks (to get IV and delta) for all needed ATM contracts
-            greek_map = await snapshot_greeks(session, streamer_syms, timeout_s=timeout_s)
-
-            for target, ch in choices.items():
-                # Skip if X-earn IV already available (unless force_greeks_iv)
-                if target in atm_iv_by_target and not force_greeks_iv:
+            # Build rows for double calendar pairs
+            for front, back in pairs:
+                if front not in delta_choices or back not in delta_choices:
                     continue
 
-                call_iv = None
-                put_iv = None
-                # Unpack (iv, delta) tuples from greek_map
-                if ch.call_streamer_symbol in greek_map:
-                    iv, delta = greek_map[ch.call_streamer_symbol]
-                    call_iv = iv if iv is not None and iv > 0 else None
-                if ch.put_streamer_symbol in greek_map:
-                    iv, delta = greek_map[ch.put_streamer_symbol]
-                    put_iv = iv if iv is not None and iv > 0 else None
+                front_choice = delta_choices[front]
+                back_choice = delta_choices[back]
 
-                # If both present, average; if one present, use it.
-                ivs = [v for v in [call_iv, put_iv] if v and v > 0]
-                if ivs:
-                    atm_iv_by_target[target] = sum(ivs) / len(ivs)
-                    iv_source_by_target[target] = "greeks"
+                # Check if we have both call and put strikes for both expirations
+                front_call = front_choice["call_35delta"]
+                back_call = back_choice["call_35delta"]
+                front_put = front_choice["put_35delta"]
+                back_put = back_choice["put_35delta"]
 
-        # Log X-earn IV fallback warnings
-        if use_xearn_iv and not force_greeks_iv:
-            for target in choices.keys():
-                if target not in iv_source_by_target or iv_source_by_target[target] == "greeks":
-                    print(f"[INFO] {sym} {target}DTE: X-earn IV unavailable, using Greeks IV", file=sys.stderr)
+                # We need at least one complete calendar (call or put)
+                has_call_calendar = front_call is not None and back_call is not None
+                has_put_calendar = front_put is not None and back_put is not None
 
-        # 6) Build rows for pairs
-        for front, back in pairs:
-            if front not in choices or back not in choices:
+                if not (has_call_calendar or has_put_calendar):
+                    continue
+
+                # Process call calendar
+                if has_call_calendar:
+                    fwd_call = forward_iv(front_call.iv, back_call.iv, front_choice["dte"], back_choice["dte"])
+                    if fwd_call and fwd_call > 0:
+                        ff_call = (front_call.iv - fwd_call) / fwd_call
+                        if ff_call >= min_ff or show_all_scans:
+                            rows.append({
+                                "symbol": sym,
+                                "calendar_type": "call",
+                                "front_target_dte": front,
+                                "front_exp": front_choice["expiration"].isoformat(),
+                                "front_dte": front_choice["dte"],
+                                "front_strike": f"{front_call.strike:.2f}",
+                                "front_delta": round(front_call.actual_delta, 4),
+                                "front_iv": round(front_call.iv, 6),
+                                "back_target_dte": back,
+                                "back_exp": back_choice["expiration"].isoformat(),
+                                "back_dte": back_choice["dte"],
+                                "back_strike": f"{back_call.strike:.2f}",
+                                "back_delta": round(back_call.actual_delta, 4),
+                                "back_iv": round(back_call.iv, 6),
+                                "fwd_iv": round(fwd_call, 6),
+                                "ff_ratio": round(ff_call, 6),
+                                "iv_source": "greeks"  # Delta strikes always use Greeks IV
+                            })
+
+                # Process put calendar
+                if has_put_calendar:
+                    fwd_put = forward_iv(front_put.iv, back_put.iv, front_choice["dte"], back_choice["dte"])
+                    if fwd_put and fwd_put > 0:
+                        ff_put = (front_put.iv - fwd_put) / fwd_put
+                        if ff_put >= min_ff or show_all_scans:
+                            rows.append({
+                                "symbol": sym,
+                                "calendar_type": "put",
+                                "front_target_dte": front,
+                                "front_exp": front_choice["expiration"].isoformat(),
+                                "front_dte": front_choice["dte"],
+                                "front_strike": f"{front_put.strike:.2f}",
+                                "front_delta": round(front_put.actual_delta, 4),
+                                "front_iv": round(front_put.iv, 6),
+                                "back_target_dte": back,
+                                "back_exp": back_choice["expiration"].isoformat(),
+                                "back_dte": back_choice["dte"],
+                                "back_strike": f"{back_put.strike:.2f}",
+                                "back_delta": round(back_put.actual_delta, 4),
+                                "back_iv": round(back_put.iv, 6),
+                                "fwd_iv": round(fwd_put, 6),
+                                "ff_ratio": round(ff_put, 6),
+                                "iv_source": "greeks"  # Delta strikes always use Greeks IV
+                            })
+
+        else:
+            # ========== ATM CALENDAR MODE (existing logic) ==========
+            choices: Dict[int, ATMChoice] = {}
+            streamer_syms: List[str] = []
+
+            for target in required_targets:
+                exp_date = nearest_expiration(chain, target, dte_tolerance)
+                if exp_date is None:
+                    continue
+                exp_obj = exp_by_date[exp_date]
+                strike, call_sym, put_sym = pick_atm_strike(exp_obj, spot)
+                choices[target] = ATMChoice(
+                    expiration=exp_date,
+                    strike=strike,
+                    call_streamer_symbol=call_sym,
+                    put_streamer_symbol=put_sym,
+                    dte=dte(exp_date, today),
+                )
+                streamer_syms.extend([call_sym, put_sym])
+
+            if not choices:
+                print(f"[WARN] No expirations matched tolerance for {sym}", file=sys.stderr)
                 continue
-            if front not in atm_iv_by_target or back not in atm_iv_by_target:
-                continue
 
-            front_choice = choices[front]
-            back_choice = choices[back]
-            iv_f = atm_iv_by_target[front]
-            iv_b = atm_iv_by_target[back]
+            # 4) Try X-earn IV first (if enabled), then fall back to Greeks IV
+            atm_iv_by_target: Dict[int, float] = {}
+            iv_source_by_target: Dict[int, str] = {}
 
-            fwd = forward_iv(iv_f, iv_b, front_choice.dte, back_choice.dte)
-            if fwd is None:
-                continue
-            ff = (iv_f - fwd) / fwd if fwd > 0 else None
-            if ff is None:
-                continue
+                # Try X-earn IV for each target DTE
+            if use_xearn_iv and not force_greeks_iv:
+                for target, ch in choices.items():
+                    xearn_iv = extract_xearn_iv(market_metrics, sym, ch.expiration)
+                    if xearn_iv is not None and xearn_iv > 0:
+                        atm_iv_by_target[target] = xearn_iv
+                        iv_source_by_target[target] = "xearn"
 
-            # Determine IV source for this pair (prefer front, fall back to back)
-            iv_src = iv_source_by_target.get(front, iv_source_by_target.get(back, "greeks"))
+            # For targets without X-earn IV, fall back to Greeks IV
+            targets_needing_greeks = [t for t in choices.keys() if t not in atm_iv_by_target]
 
-            # Include result if: (1) meets FF threshold, OR (2) show_all_scans is enabled
-            if ff >= min_ff or show_all_scans:
-                rows.append({
-                    "symbol": sym,
-                    "front_target_dte": front,
-                    "front_exp": front_choice.expiration.isoformat(),
-                    "front_dte": front_choice.dte,
-                    "front_atm_strike": f"{front_choice.strike:.2f}",
-                    "front_atm_iv": round(iv_f, 6),
-                    "back_target_dte": back,
-                    "back_exp": back_choice.expiration.isoformat(),
-                    "back_dte": back_choice.dte,
-                    "back_atm_strike": f"{back_choice.strike:.2f}",
-                    "back_atm_iv": round(iv_b, 6),
-                    "fwd_iv": round(fwd, 6),
-                    "ff_ratio": round(ff, 6),
-                    "iv_source": iv_src,
-                })
+            if targets_needing_greeks or force_greeks_iv:
+                # Snapshot Greeks (to get IV and delta) for all needed ATM contracts
+                greek_map = await snapshot_greeks(session, streamer_syms, timeout_s=timeout_s)
+
+                for target, ch in choices.items():
+                    # Skip if X-earn IV already available (unless force_greeks_iv)
+                    if target in atm_iv_by_target and not force_greeks_iv:
+                        continue
+
+                    call_iv = None
+                    put_iv = None
+                    # Unpack (iv, delta) tuples from greek_map
+                    if ch.call_streamer_symbol in greek_map:
+                        iv, delta = greek_map[ch.call_streamer_symbol]
+                        call_iv = iv if iv is not None and iv > 0 else None
+                    if ch.put_streamer_symbol in greek_map:
+                        iv, delta = greek_map[ch.put_streamer_symbol]
+                        put_iv = iv if iv is not None and iv > 0 else None
+
+                    # If both present, average; if one present, use it.
+                    ivs = [v for v in [call_iv, put_iv] if v and v > 0]
+                    if ivs:
+                        atm_iv_by_target[target] = sum(ivs) / len(ivs)
+                        iv_source_by_target[target] = "greeks"
+
+            # Log X-earn IV fallback warnings
+            if use_xearn_iv and not force_greeks_iv:
+                for target in choices.keys():
+                    if target not in iv_source_by_target or iv_source_by_target[target] == "greeks":
+                        print(f"[INFO] {sym} {target}DTE: X-earn IV unavailable, using Greeks IV", file=sys.stderr)
+
+            # 6) Build rows for pairs
+            for front, back in pairs:
+                if front not in choices or back not in choices:
+                    continue
+                if front not in atm_iv_by_target or back not in atm_iv_by_target:
+                    continue
+
+                front_choice = choices[front]
+                back_choice = choices[back]
+                iv_f = atm_iv_by_target[front]
+                iv_b = atm_iv_by_target[back]
+
+                fwd = forward_iv(iv_f, iv_b, front_choice.dte, back_choice.dte)
+                if fwd is None:
+                    continue
+                ff = (iv_f - fwd) / fwd if fwd > 0 else None
+                if ff is None:
+                    continue
+
+                # Determine IV source for this pair (prefer front, fall back to back)
+                iv_src = iv_source_by_target.get(front, iv_source_by_target.get(back, "greeks"))
+
+                # Include result if: (1) meets FF threshold, OR (2) show_all_scans is enabled
+                if ff >= min_ff or show_all_scans:
+                    rows.append({
+                        "symbol": sym,
+                        "front_target_dte": front,
+                        "front_exp": front_choice.expiration.isoformat(),
+                        "front_dte": front_choice.dte,
+                        "front_atm_strike": f"{front_choice.strike:.2f}",
+                        "front_atm_iv": round(iv_f, 6),
+                        "back_target_dte": back,
+                        "back_exp": back_choice.expiration.isoformat(),
+                        "back_dte": back_choice.dte,
+                        "back_atm_strike": f"{back_choice.strike:.2f}",
+                        "back_atm_iv": round(iv_b, 6),
+                        "fwd_iv": round(fwd, 6),
+                        "ff_ratio": round(ff, 6),
+                        "iv_source": iv_src,
+                    })
 
     # Sort by highest FF
     rows.sort(key=lambda r: r["ff_ratio"], reverse=True)
@@ -538,6 +780,12 @@ def main():
     ap.add_argument("--show-all-scans", action="store_true",
                     help="Show all scan results regardless of FF threshold (for data pipeline testing).")
 
+    # Double calendar flags
+    ap.add_argument("--double-calendar", action="store_true",
+                    help="Scan for double calendars at ±35Δ instead of ATM calendars.")
+    ap.add_argument("--delta-tolerance", type=float, default=0.05,
+                    help="Delta tolerance for double calendars (default: 0.05 = ±5Δ).")
+
     args = ap.parse_args()
     tickers = read_list_arg(args.tickers)
     pairs = parse_pairs(read_list_arg(args.pairs))
@@ -563,22 +811,35 @@ def main():
         show_earnings_conflicts=args.show_earnings_conflicts,
         use_xearn_iv=args.use_xearn_iv,
         force_greeks_iv=args.force_greeks_iv,
-        show_all_scans=args.show_all_scans
+        show_all_scans=args.show_all_scans,
+        double_calendar=args.double_calendar,
+        delta_tolerance=args.delta_tolerance
     ))
 
     # Print results
-    cols = [
-        "symbol", "front_target_dte", "front_exp", "front_dte", "front_atm_strike", "front_atm_iv",
-        "back_target_dte", "back_exp", "back_dte", "back_atm_strike", "back_atm_iv",
-        "fwd_iv", "ff_ratio", "iv_source",
-    ]
+    if args.double_calendar:
+        # Double calendar columns
+        cols = [
+            "symbol", "calendar_type", "front_target_dte", "front_exp", "front_dte",
+            "front_strike", "front_delta", "front_iv",
+            "back_target_dte", "back_exp", "back_dte",
+            "back_strike", "back_delta", "back_iv",
+            "fwd_iv", "ff_ratio", "iv_source",
+        ]
+    else:
+        # ATM calendar columns
+        cols = [
+            "symbol", "front_target_dte", "front_exp", "front_dte", "front_atm_strike", "front_atm_iv",
+            "back_target_dte", "back_exp", "back_dte", "back_atm_strike", "back_atm_iv",
+            "fwd_iv", "ff_ratio", "iv_source",
+        ]
 
     if not rows:
         print("No results passing filters.")
     else:
         print(",".join(cols))
         for r in rows:
-            print(",".join(str(r[c]) for c in cols))
+            print(",".join(str(r.get(c, "")) for c in cols))
 
     # Optional outputs
     if args.json_out and rows:

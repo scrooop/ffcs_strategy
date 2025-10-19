@@ -464,9 +464,9 @@ The `combined_ff` column is used for sorting all results (highest first).
 
 ```csv
 timestamp,symbol,structure,spot_price,front_dte,back_dte,...,call_strike,put_strike,call_delta,put_delta,call_ff,put_ff,combined_ff
-2025-10-19T14:30:00Z,SPY,double-call,580.50,30,60,...,595.00,,0.3498,,0.2547,,0.2547
-2025-10-19T14:30:00Z,SPY,double-put,580.50,30,60,...,,565.00,,-0.3512,,0.2398,0.2398
-2025-10-19T14:30:00Z,SPY,atm-call,580.50,30,60,...,580.00,,,,,0.2312,0.2312
+2025-10-19T14:30:00.123456+00:00,SPY,double-call,580.50,30,60,...,595.00,,0.3498,,0.2547,,0.2547
+2025-10-19T14:30:00.123456+00:00,SPY,double-put,580.50,30,60,...,,565.00,,-0.3512,,0.2398,0.2398
+2025-10-19T14:30:00.123456+00:00,SPY,atm-call,580.50,30,60,...,580.00,,,,,0.2312,0.2312
 ```
 
 **When Delta Strikes Are Unavailable:**
@@ -482,6 +482,63 @@ Double calendar scanning requires fetching Greeks for more strikes (8-12 strikes
 
 ---
 
+### IV Variation Across Strikes: Understanding FF Differences
+
+**CRITICAL CONCEPT:** The scanner uses IV from the **actual strikes being traded**, not a generic "term structure IV". This means ATM calendars and double calendars will show **different FF values** for the same underlying, even though both trade the same term structure edge.
+
+**Which IVs Are Used:**
+
+| Structure | Front IV (σ₁) | Back IV (σ₂) |
+|-----------|--------------|--------------|
+| **ATM Call Calendar** | IV from ATM strike at front expiration (average of call + put IV) | IV from ATM strike at back expiration (average of call + put IV) |
+| **+35Δ Call Calendar** | IV from +35Δ call strike at front expiration | IV from +35Δ call strike at back expiration |
+| **−35Δ Put Calendar** | IV from −35Δ put strike at front expiration | IV from −35Δ put strike at back expiration |
+
+**Why IV Varies Across Strikes (Volatility Skew):**
+
+Implied volatility is **not constant** across the option chain. In equity markets, you typically see:
+- **OTM puts:** Higher IV than ATM (downside protection premium)
+- **OTM calls:** Lower IV than ATM
+- **Typical magnitude:** 5-10 percentage points difference
+
+**Real-World Example (SPY):**
+
+Assume SPY is at $580 with these IV levels:
+- **ATM (580 strike, 50Δ):** 20% IV
+- **+35Δ call (595 strike):** 18% IV (10% lower than ATM)
+- **−35Δ put (565 strike):** 25% IV (25% higher than ATM)
+
+For a 30-60 DTE calendar spread, the scanner will report **three different FF values**:
+1. **ATM calendar:** FF = 0.23 (based on 20% IV)
+2. **+35Δ call calendar:** FF = 0.21 (based on 18% IV, ~9% lower FF)
+3. **−35Δ put calendar:** FF = 0.29 (based on 25% IV, ~26% higher FF)
+
+**Why This Matters:**
+
+1. **Double calendars "tap into skew"** - You're trading both term structure mispricing AND strike-level mispricing
+2. **Put calendars typically rank higher** - Higher IV at OTM put strikes leads to higher FF values
+3. **This is by design** - You're trading the actual strikes, so the scanner uses those strikes' IVs
+4. **Apples-to-apples comparison** - Compare ATM calendars to ATM calendars, double calendars to double calendars
+
+**Practical Implications:**
+
+- If scanning with `--structure both`, you'll see the same ticker appear **three times** in results with different FFs
+- The **−35Δ put calendar will often rank highest** due to equity volatility skew
+- This doesn't mean it's a "better" trade - it's a **different** trade with different strikes and different skew exposure
+- Use `combined_ff` for sorting, but understand that higher FF on a put calendar reflects **both term structure AND skew**
+
+**How the Scanner Implements This:**
+
+1. **`pick_atm_strike()`**: Finds strike closest to spot price
+2. **`pick_delta_strike()`**: Finds strike closest to target delta (±35Δ)
+3. **`snapshot_greeks()`**: Fetches actual IV from dxFeed for each specific strike
+4. **`forward_iv()`**: Uses those strike-specific IVs (not interpolated surface values)
+5. **FF calculation**: `FF = (strike_IV_front - fwd_IV) / fwd_IV`
+
+**Key Takeaway:** When you see "front IV" and "back IV" in the documentation or CSV output, these refer to the IV **from the specific strikes being traded** (ATM for ATM calendars, ±35Δ for double calendars), not a generic market-wide implied volatility index.
+
+---
+
 ## CSV Output Schema
 
 ### 25-Column Schema (v2.0)
@@ -490,7 +547,7 @@ The scanner outputs a unified CSV schema that supports both ATM and double calen
 
 | Column | Type | Description | ATM Calendar | Double Calendar |
 |--------|------|-------------|--------------|-----------------|
-| `timestamp` | ISO 8601 | UTC timestamp when scan was run | ✅ | ✅ |
+| `timestamp` | ISO 8601 | UTC timestamp when scan was run (RFC 3339 format) | ✅ | ✅ |
 | `symbol` | string | Ticker symbol (e.g., "SPY") | ✅ | ✅ |
 | `structure` | enum | `atm-call`, `double-call`, or `double-put` | ✅ | ✅ |
 | `spot_price` | float | Underlying last price | ✅ | ✅ |
@@ -523,21 +580,21 @@ The scanner outputs a unified CSV schema that supports both ATM and double calen
 
 ```csv
 timestamp,symbol,structure,spot_price,front_dte,back_dte,front_expiry,back_expiry,atm_strike,call_strike,put_strike,call_delta,put_delta,front_iv,back_iv,fwd_iv,ff,call_ff,put_ff,combined_ff,earnings_date,earnings_conflict,liquidity_rating,liquidity_value,iv_source_front,iv_source_back
-2025-10-19T14:30:00Z,SPY,atm-call,580.50,30,60,2025-11-18,2025-12-18,580.00,,,,,0.185432,0.172145,0.158967,0.166234,,,0.166234,,no,5,,greeks,greeks
+2025-10-19T14:30:00.123456+00:00,SPY,atm-call,580.50,30,60,2025-11-18,2025-12-18,580.00,,,,,0.185432,0.172145,0.158967,0.166234,,,0.166234,,no,5,,greeks,greeks
 ```
 
 **Double Call Calendar:**
 
 ```csv
 timestamp,symbol,structure,spot_price,front_dte,back_dte,front_expiry,back_expiry,atm_strike,call_strike,put_strike,call_delta,put_delta,front_iv,back_iv,fwd_iv,ff,call_ff,put_ff,combined_ff,earnings_date,earnings_conflict,liquidity_rating,liquidity_value,iv_source_front,iv_source_back
-2025-10-19T14:30:00Z,SPY,double-call,580.50,30,60,2025-11-18,2025-12-18,,595.00,,0.3498,,0.192456,0.175234,0.163512,,0.177123,,0.177123,,no,5,,greeks,greeks
+2025-10-19T14:30:00.123456+00:00,SPY,double-call,580.50,30,60,2025-11-18,2025-12-18,,595.00,,0.3498,,0.192456,0.175234,0.163512,,0.177123,,0.177123,,no,5,,greeks,greeks
 ```
 
 **Double Put Calendar:**
 
 ```csv
 timestamp,symbol,structure,spot_price,front_dte,back_dte,front_expiry,back_expiry,atm_strike,call_strike,put_strike,call_delta,put_delta,front_iv,back_iv,fwd_iv,ff,call_ff,put_ff,combined_ff,earnings_date,earnings_conflict,liquidity_rating,liquidity_value,iv_source_front,iv_source_back
-2025-10-19T14:30:00Z,SPY,double-put,580.50,30,60,2025-11-18,2025-12-18,,,565.00,,-0.3512,0.188234,0.173456,0.161234,,,0.167523,0.167523,,no,5,,greeks,greeks
+2025-10-19T14:30:00.123456+00:00,SPY,double-put,580.50,30,60,2025-11-18,2025-12-18,,,565.00,,-0.3512,0.188234,0.173456,0.161234,,,0.167523,0.167523,,no,5,,greeks,greeks
 ```
 
 ### Sorting
@@ -900,20 +957,36 @@ python scripts/ff_tastytrade_scanner.py \
 
 ### Example 8: Scan Futures Options (v2.1)
 
+**Supported Futures (8 verified working):**
+- **Equity Indexes:** `/ES`, `/NQ`, `/RTY`, `/MES`, `/MNQ` ✅
+- **Commodities:** `/GC` (Gold), `/CL` (Crude Oil), `/MCL` (Micro Crude) ✅
+
+**Note:** All supported futures have 30-60 day options. Other futures like /SI, /ZB, /NG either have no chains or non-standard expirations.
+
 ```bash
+# Scan major equity index futures
 python scripts/ff_tastytrade_scanner.py \
-  --tickers /ES /GC /NQ \
+  --tickers /ES /NQ /RTY \
   --pairs 30-60 \
   --min-ff 0.20 \
   --csv-out futures_scan.csv
+
+# Scan all supported futures (recommended)
+python scripts/ff_tastytrade_scanner.py \
+  --tickers /ES /NQ /RTY /GC /CL /MES /MNQ /MCL \
+  --pairs 30-60 30-90 60-90 \
+  --min-ff 0.20 \
+  --csv-out all_futures_scan.csv
 ```
 
 **Output:**
 
 ```csv
-timestamp,symbol,structure,spot_price,front_dte,back_dte,...
-2025-10-19T19:41:07Z,/ES,double-call,65.00,33,61,...
-2025-10-19T19:41:07Z,/ES,atm-call,65.00,33,61,...
+timestamp,symbol,structure,spot_price,front_dte,back_dte,atm_strike,...
+2025-10-19T20:23:05.134570+00:00,/ES,atm-call,6702.50,30,61,6700.00,...
+2025-10-19T20:23:05.134570+00:00,/NQ,atm-call,24986.50,33,61,25000.00,...
+2025-10-19T20:23:05.134570+00:00,/GC,atm-call,4213.30,30,65,4215.00,...
+2025-10-19T20:23:05.134570+00:00,/CL,atm-call,57.54,29,58,57.50,...
 ```
 
 **Use Case:** Scan liquid futures for calendar spread opportunities. Futures don't have earnings, so earnings filtering is automatically bypassed.
@@ -922,13 +995,16 @@ timestamp,symbol,structure,spot_price,front_dte,back_dte,...
 
 ```bash
 python scripts/ff_tastytrade_scanner.py \
-  --tickers SPY /ES QQQ /NQ AAPL \
+  --tickers SPY /ES QQQ /NQ IWM /RTY AAPL \
   --pairs 30-60 \
   --min-ff 0.20 \
   --csv-out mixed_scan.csv
 ```
 
-**Note:** Spot prices for futures are inferred from option chain strikes (API limitation).
+**Requirements:**
+- `pip install yfinance` (spot prices fetched from Yahoo Finance)
+- Futures options trading approval on tastytrade account
+- Note: Liquidity filtering applies to futures (use `--skip-liquidity-check` if needed)
 
 ---
 

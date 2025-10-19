@@ -29,7 +29,7 @@ import json
 import asyncio
 import argparse
 from dataclasses import dataclass
-from datetime import date, datetime
+from datetime import date, datetime, UTC
 from typing import Dict, List, Tuple, Optional
 
 from tastytrade import Session, DXLinkStreamer
@@ -37,8 +37,10 @@ from tastytrade.market_data import get_market_data
 from tastytrade.metrics import get_market_metrics
 from tastytrade.order import InstrumentType
 from tastytrade.instruments import NestedOptionChain, NestedFutureOptionChain
-from tastytrade.dxfeed import Greeks
+from tastytrade.dxfeed import Greeks, Quote
 from tastytrade.utils import today_in_new_york
+
+import yfinance as yf
 
 # ---------- Helpers ----------
 
@@ -99,58 +101,113 @@ def is_futures_symbol(symbol: str) -> bool:
     """
     return symbol.startswith('/')
 
-def get_futures_spot_price(session: Session, symbol: str) -> Optional[float]:
+def tastytrade_to_yahoo_futures(symbol: str) -> Optional[str]:
     """
-    Get spot price for a futures symbol from the active (front-month) contract.
-
-    Uses NestedFutureOptionChain to find the active contract, then fetches
-    market data for that specific contract symbol (e.g., /ESZ5 for /ES).
+    Map tastytrade futures symbols to Yahoo Finance futures tickers.
 
     Args:
-        session: tastytrade Session object
+        symbol: Tastytrade futures symbol (e.g., '/ES', '/GC', '/NQ')
+
+    Returns:
+        Yahoo Finance futures ticker (e.g., 'ES=F', 'GC=F', 'NQ=F'), or None if unknown
+
+    Example:
+        >>> tastytrade_to_yahoo_futures('/ES')
+        'ES=F'
+    """
+    # Common futures symbols mapping
+    mapping = {
+        # Equity Index Futures
+        '/ES': 'ES=F',      # E-mini S&P 500
+        '/MES': 'MES=F',    # Micro E-mini S&P 500
+        '/NQ': 'NQ=F',      # E-mini Nasdaq-100
+        '/MNQ': 'MNQ=F',    # Micro E-mini Nasdaq-100
+        '/YM': 'YM=F',      # E-mini Dow
+        '/RTY': 'RTY=F',    # E-mini Russell 2000
+        '/SR3': 'RTY=F',    # Mini Russell 1000 (use RTY as proxy)
+
+        # Metals
+        '/GC': 'GC=F',      # Gold
+        '/SI': 'SI=F',      # Silver
+        '/HG': 'HG=F',      # Copper
+
+        # Energy
+        '/CL': 'CL=F',      # Crude Oil
+        '/MCL': 'MCL=F',    # Micro Crude Oil
+        '/NG': 'NG=F',      # Natural Gas
+
+        # Treasuries
+        '/ZB': 'ZB=F',      # 30-Year T-Bond
+        '/ZN': 'ZN=F',      # 10-Year T-Note
+        '/ZF': 'ZF=F',      # 5-Year T-Note
+        '/ZT': 'ZT=F',      # 2-Year T-Note
+
+        # Agriculture
+        '/ZC': 'ZC=F',      # Corn
+        '/ZS': 'ZS=F',      # Soybeans
+        '/ZW': 'ZW=F',      # Wheat
+        '/HE': 'HE=F',      # Lean Hogs
+        '/LE': 'LE=F',      # Live Cattle
+
+        # Currencies
+        '/6E': '6E=F',      # Euro FX
+        '/6J': '6J=F',      # Japanese Yen
+        '/6B': '6B=F',      # British Pound
+        '/6A': '6A=F',      # Australian Dollar
+        '/6C': '6C=F',      # Canadian Dollar
+
+        # Crypto (may not have =F format on Yahoo)
+        '/BTC': 'BTC-USD',  # Bitcoin (use spot, not futures)
+        '/ETH': 'ETH-USD',  # Ethereum (use spot, not futures)
+    }
+    return mapping.get(symbol)
+
+
+def get_futures_spot_price(symbol: str) -> Optional[float]:
+    """
+    Get spot price for a futures symbol from Yahoo Finance.
+
+    Uses yfinance to fetch the current price since tastytrade API doesn't
+    provide futures spot prices reliably.
+
+    Args:
         symbol: Futures root symbol (e.g., '/ES', '/GC', '/NQ')
 
     Returns:
-        The last traded price of the active futures contract, or None if unavailable
+        The last traded price of the futures contract, or None if unavailable
 
     Raises:
         None - returns None on any error
 
     Example:
-        >>> session = Session('username', 'password')
-        >>> price = get_futures_spot_price(session, '/ES')
+        >>> price = get_futures_spot_price('/ES')
         >>> print(f'/ES spot: {price}')
-        /ES spot: 4521.50
+        /ES spot: 5921.50
     """
     try:
-        # Get futures option chain to find the active contract
-        chain = NestedFutureOptionChain.get(session, symbol)
-        if not chain or not chain.futures:
-            print(f"[WARN] No futures chain found for {symbol}", file=sys.stderr)
+        yahoo_symbol = tastytrade_to_yahoo_futures(symbol)
+        if not yahoo_symbol:
+            print(f"[WARN] Unknown futures symbol {symbol}, no Yahoo Finance mapping", file=sys.stderr)
             return None
 
-        # Find the active month contract
-        active_contract = None
-        for future in chain.futures:
-            if hasattr(future, 'active_month') and future.active_month:
-                active_contract = future.symbol
-                break
+        # Fetch current price from Yahoo Finance
+        ticker = yf.Ticker(yahoo_symbol)
+        info = ticker.fast_info
 
-        if not active_contract:
-            print(f"[WARN] No active contract found for {symbol}", file=sys.stderr)
-            return None
+        # Try to get last price
+        if hasattr(info, 'last_price') and info.last_price:
+            return float(info.last_price)
 
-        # Get market data for the active contract (e.g., /ESZ5)
-        md = get_market_data(session, active_contract, InstrumentType.FUTURE)
+        # Fallback to regular price
+        hist = ticker.history(period='1d', interval='1m')
+        if not hist.empty:
+            return float(hist['Close'].iloc[-1])
 
-        if md is None or md.last is None:
-            print(f"[WARN] No quote for active contract {active_contract}", file=sys.stderr)
-            return None
-
-        return float(md.last) if md.last is not None else float(md.mark)
+        print(f"[WARN] No price data available for {yahoo_symbol}", file=sys.stderr)
+        return None
 
     except Exception as e:
-        print(f"[ERROR] Failed to get futures spot price for {symbol}: {e}", file=sys.stderr)
+        print(f"[WARN] Could not get futures spot price for {symbol}: {e}", file=sys.stderr)
         return None
 
 @dataclass(frozen=True)
@@ -720,7 +777,7 @@ async def scan(session: Session, tickers: List[str], pairs: List[Tuple[int, int]
     rows: List[dict] = []
     filtered_rows: List[dict] = []  # For --show-earnings-conflicts
     today = ny_today()
-    timestamp = datetime.utcnow().isoformat() + 'Z'  # ISO 8601 UTC timestamp
+    timestamp = datetime.now(UTC).isoformat()  # ISO 8601 UTC timestamp
 
     # Fetch market metrics for all symbols upfront (batched)
     market_metrics = fetch_market_metrics(session, tickers)
@@ -732,20 +789,22 @@ async def scan(session: Session, tickers: List[str], pairs: List[Tuple[int, int]
 
         # 1) Underlying spot - handle futures vs equity
         if is_futures_symbol(sym):
-            # For futures, get spot from active contract
-            spot = get_futures_spot_price(session, sym)
+            # For futures, get spot from Yahoo Finance (tastytrade doesn't provide futures prices)
+            spot = get_futures_spot_price(sym)
             if spot is None:
-                # Futures spot price not critical - we can infer from option strikes
-                # Use a default that will be overridden by ATM strike selection
-                print(f"[INFO] Using option chain for {sym} (futures spot not available)", file=sys.stderr)
-                spot = 0.0  # Will be inferred from option chain
+                print(f"[WARN] No quote available for {sym}, skipping.", file=sys.stderr)
+                continue
         else:
             # For equity, use standard equity market data
-            md = get_market_data(session, sym, InstrumentType.EQUITY)
-            if md is None or md.last is None:
-                print(f"[WARN] No quote for {sym}, skipping.", file=sys.stderr)
+            try:
+                md = get_market_data(session, sym, InstrumentType.EQUITY)
+                if md is None or md.last is None:
+                    print(f"[WARN] No quote for {sym}, skipping.", file=sys.stderr)
+                    continue
+                spot = float(md.last) if md.last is not None else float(md.mark)
+            except Exception as e:
+                print(f"[WARN] Could not get market data for {sym}: {e}, skipping.", file=sys.stderr)
                 continue
-            spot = float(md.last) if md.last is not None else float(md.mark)
 
         # 2) Extract earnings and liquidity data for this symbol
         earnings_date = None
@@ -757,20 +816,21 @@ async def scan(session: Session, tickers: List[str], pairs: List[Tuple[int, int]
                 earnings_date = getattr(earnings, 'expected_report_date', None)
             liquidity_rating = getattr(metric_info, 'liquidity_rating', None)
 
-        # 3) Chain (nested)
-        chain_list = NestedOptionChain.get(session, sym)
-        if not chain_list:
-            print(f"[WARN] No option chain for {sym}, skipping.", file=sys.stderr)
-            continue
-        chain = chain_list[0]  # API returns a list; take first element
-
-        # For futures, infer spot from option chain if not available
-        if is_futures_symbol(sym) and spot == 0.0:
-            if chain.expirations and chain.expirations[0].strikes:
-                # Use middle strike as proxy for spot price
-                strikes = [s.strike_price for s in chain.expirations[0].strikes]
-                spot = float(sorted(strikes)[len(strikes) // 2])
-                print(f"[INFO] Inferred {sym} spot from option chain: {spot:.2f}", file=sys.stderr)
+        # 3) Chain (nested) - handle futures vs equity
+        if is_futures_symbol(sym):
+            # For futures, use NestedFutureOptionChain and extract option_chains
+            futures_chain = NestedFutureOptionChain.get(session, sym)
+            if not futures_chain or not futures_chain.option_chains:
+                print(f"[WARN] No option chain for {sym}, skipping.", file=sys.stderr)
+                continue
+            chain = futures_chain.option_chains[0]  # Get the first option chain
+        else:
+            # For equity, use NestedOptionChain
+            chain_list = NestedOptionChain.get(session, sym)
+            if not chain_list:
+                print(f"[WARN] No option chain for {sym}, skipping.", file=sys.stderr)
+                continue
+            chain = chain_list[0]  # API returns a list; take first element
 
         # Pre-index expirations by date for fast lookup
         exp_by_date = {exp.expiration_date: exp for exp in chain.expirations}

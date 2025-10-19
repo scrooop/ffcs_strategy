@@ -24,9 +24,24 @@ A step‑by‑step, repeatable process for trading **forward volatility** using 
 ---
 
 ## 2) Compute Forward IV and Forward Factor (FF)
-Let:
-- \(\sigma_1\): annualized IV for the **front** expiry (time to expiry \(T_1\) in **years**).
-- \(\sigma_2\): annualized IV for the **back** expiry (time to expiry \(T_2>T_1\) in **years**).
+
+### Which IV Values to Use
+
+**For ATM Call Calendars:**
+- \(\sigma_1\): annualized IV from the **ATM strike** at the **front** expiry (time to expiry \(T_1\) in **years**).
+- \(\sigma_2\): annualized IV from the **ATM strike** at the **back** expiry (time to expiry \(T_2>T_1\) in **years**).
+- **ATM strike** = strike price closest to current spot price
+- **IV extraction:** Average the call IV and put IV at the ATM strike
+
+**For Double Calendars (±35Δ):**
+- **Call calendar:** Use IV from the **+35Δ call strike** at front and back expiries
+- **Put calendar:** Use IV from the **−35Δ put strike** at front and back expiries
+- **Strike selection:** Find the strike whose actual delta is closest to ±0.35 (within ±0.05 tolerance)
+- **IV extraction:** Use the IV from that specific strike's Greeks data
+
+> **Why it matters:** IV varies across strikes due to volatility skew. In equities, OTM puts typically have 5-10 percentage points higher IV than ATM options. This means a −35Δ put calendar may show 15-35% higher FF than an ATM calendar on the same underlying, even though both trade the same term structure edge.
+
+### Forward Variance and Forward IV
 
 **Forward variance** between \(T_1\) and \(T_2\):
 \[
@@ -42,7 +57,7 @@ Let:
 \[
 \mathrm{FF} = \frac{\sigma_1 - \sigma_{fwd}}{\sigma_{fwd}}
 \]
-- **Interpretation:** FF > 0 ⇒ front IV “hot” vs forward IV (backwardation) ⇒ **go long forward vol** (via long calendar).
+- **Interpretation:** FF > 0 ⇒ front IV "hot" vs forward IV (backwardation) ⇒ **go long forward vol** (via long calendar).
 
 > **Time units:** Convert DTE to years, e.g., 30 days → 30/365, 60 days → 60/365.
 

@@ -215,6 +215,55 @@ python scripts/ff_tastytrade_scanner.py \
 - Default: `--use-xearn-iv` (try X-earn IV, fallback to Greeks IV)
 - `--force-greeks-iv`: Always use Greeks IV, never attempt X-earn IV
 
+### IV Variation Across Strikes: How It Affects FF Calculations
+
+**CRITICAL IMPLEMENTATION DETAIL:** The scanner uses IV from the **actual strikes being traded**, not a generic "term structure IV".
+
+**For ATM Call Calendars:**
+- **σ₁ (front IV):** IV from the **ATM strike** at front expiration
+  - ATM strike = strike price closest to current spot
+  - IV = average of (call IV, put IV) at that strike
+- **σ₂ (back IV):** IV from the **ATM strike** at back expiration
+- **FF Calculation:** `FF = (σ₁ - σ_fwd) / σ_fwd` where σ_fwd uses ATM IVs
+
+**For Double Calendars (±35Δ):**
+- **Call calendar:** Uses IV from the **+35Δ call strike** at both expirations
+- **Put calendar:** Uses IV from the **−35Δ put strike** at both expirations
+- **Strike selection:** Finds strike with delta closest to ±0.35 (within ±0.05 tolerance)
+- **Separate FF calculations:** Call and put calendars have independent FFs
+
+**Why IV Variation Matters:**
+
+Implied volatility varies significantly across the option chain due to **volatility skew**:
+- **Typical magnitude:** 5-10 percentage points between ATM and OTM options
+- **Equity skew pattern:**
+  - OTM puts: Higher IV than ATM (downside protection premium)
+  - OTM calls: Lower IV than ATM
+- **Example (SPY):**
+  - ATM (50Δ): 20% IV
+  - +35Δ call: ~18% IV (10% lower)
+  - −35Δ put: ~25% IV (25% higher)
+
+**Impact on FF Calculations:**
+
+Given the same underlying and term structure, the three calendar structures will show **different FF values**:
+1. **ATM calendar:** FF based on 20% IV (baseline)
+2. **+35Δ call calendar:** FF based on 18% IV (~10% lower FF)
+3. **−35Δ put calendar:** FF based on 25% IV (~25% higher FF)
+
+**Practical Implications:**
+- Double calendars "tap into skew" by trading both term structure AND strike-level mispricing
+- Put calendars typically show higher FF than ATM calendars on the same underlying
+- This is **by design** - you're trading the actual strikes, so use those strikes' IVs
+- Scanner outputs both `call_ff` and `put_ff` to show this variation
+- `combined_ff` = average of call and put FFs for ranking/sorting
+
+**Code Implementation:**
+- `pick_atm_strike()`: Selects strike closest to spot, returns its Greeks symbols
+- `pick_delta_strike()`: Selects strike closest to target delta, returns IV from that strike
+- `snapshot_greeks()`: Fetches actual IV from dxFeed for each specific strike
+- Forward IV calculation uses these strike-specific IVs, not interpolated surface values
+
 ### CSV Output Schema (25 Columns)
 
 Results are sorted by `combined_ff` descending (highest opportunities first).
@@ -317,11 +366,11 @@ Short-dated options often get bid up (volatility backwardation) while the next w
 FF = (σ₁ - σ_fwd) / σ_fwd
 ```
 Where:
-- σ₁ = annualized IV for front expiry
-- σ_fwd = forward IV between T₁ and T₂
+- σ₁ = annualized IV from the **strike being traded** at front expiry (ATM strike for ATM calendars, ±35Δ strike for double calendars)
+- σ_fwd = forward IV between T₁ and T₂ (calculated from σ₁ and σ₂ using variance decomposition)
 - FF > 0 → front IV "hot" vs forward IV → go long forward vol (calendar)
 
-This is the correct formula as defined in the video transcript and implemented in the scanner.
+**Important:** The IV values come from the **specific strikes you're trading**, not a generic market-wide IV index. This means ATM calendars and double calendars will show different FF values for the same underlying due to volatility skew (see "IV Variation Across Strikes" section above).
 
 ### Trade Structures
 1. **ATM Call Calendar** (simpler, cheaper)
@@ -331,38 +380,61 @@ This is the correct formula as defined in the video transcript and implemented i
 
 ## Futures Options Support (v2.1)
 
-The scanner now supports futures options (e.g., /ES, /GC, /NQ, /CL) in addition to equity options.
+The scanner now supports futures options (e.g., /ES, /CL) in addition to equity options.
 
-**Key Differences:**
+**Implementation:**
 - Futures symbols start with `/` (e.g., `/ES`, not `ES`)
+- Spot prices fetched from **Yahoo Finance** (tastytrade API doesn't provide futures prices)
+- Option chains fetched from **tastytrade** using `NestedFutureOptionChain`
 - Earnings filter automatically bypassed (futures don't have earnings)
-- Spot price inferred from option chain strikes (API limitation)
-- `--allow-earnings` flag fixed and working for both equities and futures
+- Greeks/IV data from tastytrade dxFeed streamer (same as equities)
+
+**Supported Futures (verified working):**
+- **`/ES`** - E-mini S&P 500 ✅
+- **`/NQ`** - E-mini Nasdaq-100 ✅
+- **`/RTY`** - E-mini Russell 2000 ✅
+- **`/GC`** - Gold ✅
+- **`/CL`** - Crude Oil ✅
+- **`/MES`** - Micro E-mini S&P 500 ✅
+- **`/MNQ`** - Micro E-mini Nasdaq-100 ✅
+- **`/MCL`** - Micro Crude Oil ✅
+
+**Partially Supported (chains exist but non-standard expirations):**
+- `/NG`, `/LE`, `/6A`, `/6B`, `/6C`, `/6E`, `/6J`, `/BTC`, `/ETH` - May work with different DTE pairs
+
+**Unsupported (no option chains on tastytrade):**
+- `/SI`, `/ZB`, `/ZN`, `/ZF`, `/ZT`, `/ZC`, `/ZS`, `/ZW`, `/HG`, `/HE`, `/SR3`
 
 **Usage:**
 ```bash
-# Scan futures only
+# Scan major equity index futures
 python scripts/ff_tastytrade_scanner.py \
-  --tickers /ES /GC /NQ \
+  --tickers /ES /NQ /RTY \
   --pairs 30-60 \
+  --min-ff 0.20
+
+# Scan all supported futures
+python scripts/ff_tastytrade_scanner.py \
+  --tickers /ES /NQ /RTY /GC /CL /MES /MNQ /MCL \
+  --pairs 30-60 30-90 60-90 \
   --min-ff 0.20
 
 # Mixed equities and futures
 python scripts/ff_tastytrade_scanner.py \
-  --tickers SPY /ES QQQ /NQ \
+  --tickers SPY /ES QQQ /NQ AAPL \
   --pairs 30-60 \
   --min-ff 0.20
 ```
 
-**Limitations:**
-- Spot price accuracy: Inferred from middle strike (API doesn't provide futures spot directly)
-- Liquidity metrics for futures may differ from equities
-- Requires futures options trading approval on your account
+**Requirements:**
+- `yfinance` library installed (`pip install yfinance`)
+- Futures options trading approval on tastytrade account
+- Internet access for Yahoo Finance API
 
 ## Future Enhancements
 
 Scanner could be extended with:
-- **Futures options support** (/ES, /GC, /NQ, /CL) - Investigation complete, implementation pending
+- **Additional futures support** - Expand to more futures when tastytrade adds option chains
 - Bid-ask spread quality checks (tighter filtering beyond liquidity rating)
 - Position tracking and P&L monitoring (track open positions)
 - Auto-execution via tastytrade order API (automated order placement)

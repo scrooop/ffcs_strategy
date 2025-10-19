@@ -1,10 +1,11 @@
 ---
 name: ff-scanner-v2
-status: backlog
+status: in_progress
 created: 2025-10-19T08:30:29Z
-progress: 0%
+updated: 2025-10-19T16:00:00Z
+progress: 50%
 prd: .claude/prds/ff-scanner-v2.md
-github: [Will be updated when synced to GitHub]
+github: https://github.com/scrooop/ffcs_strategy/issues/1
 ---
 
 # Epic: FF Scanner v2.0 - Enhanced Quality Filtering
@@ -444,11 +445,11 @@ All task files are located in `.claude/epics/ff-scanner-v2/tasks/`
 
 ## Tasks Created
 
-- [ ] 001.md - Market Metrics Integration (parallel: true, 3-4 hours)
-- [ ] 002.md - Enhanced Greeks Collection (parallel: true, 1-2 hours)
-- [ ] 003.md - Double Calendar Strike Selection (parallel: false, depends on 002, 3-4 hours)
-- [ ] 004.md - Double Calendar Scanning Logic (parallel: false, depends on 002, 003, 3-4 hours)
-- [ ] 005.md - X-earn IV Integration (parallel: true, 2-3 hours)
+- [x] 001.md - Market Metrics Integration (parallel: true, 3-4 hours) ✅ Completed
+- [x] 002.md - Enhanced Greeks Collection (parallel: true, 1-2 hours) ✅ Completed
+- [x] 003.md - Double Calendar Strike Selection (parallel: false, depends on 002, 3-4 hours) ✅ Completed
+- [x] 004.md - Double Calendar Scanning Logic (parallel: false, depends on 002, 003, 3-4 hours) ✅ Completed
+- [x] 005.md - X-earn IV Integration (parallel: true, 2-3 hours) ✅ Completed
 - [ ] 006.md - Enhanced CSV Output (parallel: false, depends on 001, 002, 004, 005, 2 hours)
 - [ ] 007.md - CLI Enhancement & Help Documentation (parallel: false, depends on 001, 003, 004, 005, 1-2 hours)
 - [ ] 008.md - Integration Testing & Validation (parallel: false, depends on 001-007, 2-3 hours)

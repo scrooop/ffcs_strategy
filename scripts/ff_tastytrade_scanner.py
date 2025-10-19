@@ -331,7 +331,8 @@ async def scan(session: Session, tickers: List[str], pairs: List[Tuple[int, int]
                min_ff: float, dte_tolerance: int, timeout_s: float,
                skip_earnings: bool = True, min_liquidity_rating: int = 3,
                skip_liquidity_check: bool = False, show_earnings_conflicts: bool = False,
-               use_xearn_iv: bool = True, force_greeks_iv: bool = False) -> List[dict]:
+               use_xearn_iv: bool = True, force_greeks_iv: bool = False,
+               show_all_scans: bool = False) -> List[dict]:
     rows: List[dict] = []
     filtered_rows: List[dict] = []  # For --show-earnings-conflicts
     today = ny_today()
@@ -468,10 +469,12 @@ async def scan(session: Session, tickers: List[str], pairs: List[Tuple[int, int]
             ff = (iv_f - fwd) / fwd if fwd > 0 else None
             if ff is None:
                 continue
-            if ff >= min_ff:
-                # Determine IV source for this pair (prefer front, fall back to back)
-                iv_src = iv_source_by_target.get(front, iv_source_by_target.get(back, "greeks"))
 
+            # Determine IV source for this pair (prefer front, fall back to back)
+            iv_src = iv_source_by_target.get(front, iv_source_by_target.get(back, "greeks"))
+
+            # Include result if: (1) meets FF threshold, OR (2) show_all_scans is enabled
+            if ff >= min_ff or show_all_scans:
                 rows.append({
                     "symbol": sym,
                     "front_target_dte": front,
@@ -531,6 +534,10 @@ def main():
     ap.add_argument("--force-greeks-iv", action="store_true",
                     help="Force use of Greeks IV instead of X-earn IV.")
 
+    # Debug/analysis flags
+    ap.add_argument("--show-all-scans", action="store_true",
+                    help="Show all scan results regardless of FF threshold (for data pipeline testing).")
+
     args = ap.parse_args()
     tickers = read_list_arg(args.tickers)
     pairs = parse_pairs(read_list_arg(args.pairs))
@@ -555,7 +562,8 @@ def main():
         skip_liquidity_check=args.skip_liquidity_check,
         show_earnings_conflicts=args.show_earnings_conflicts,
         use_xearn_iv=args.use_xearn_iv,
-        force_greeks_iv=args.force_greeks_iv
+        force_greeks_iv=args.force_greeks_iv,
+        show_all_scans=args.show_all_scans
     ))
 
     # Print results

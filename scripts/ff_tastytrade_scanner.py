@@ -1436,7 +1436,7 @@ async def scan(session: Session, tickers: List[str], pairs: List[Tuple[int, int]
                         "back_expiry": back_choice.expiration.isoformat(),
                         # ATM-specific (8) - populated for ATM structure
                         "atm_strike": f"{front_choice.strike:.2f}",
-                        "atm_delta": round(front_choice.actual_delta, 4),
+                        "atm_delta": round(front_choice.actual_delta, 4) if front_choice.actual_delta is not None else "",
                         "atm_ff": round(atm_ff, 6),
                         "atm_iv_front": round(atm_iv_front, 6),
                         "atm_iv_back": round(atm_iv_back, 6),

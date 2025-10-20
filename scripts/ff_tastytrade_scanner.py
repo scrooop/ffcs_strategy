@@ -44,6 +44,7 @@ from tastytrade.dxfeed import Greeks, Quote
 from tastytrade.utils import today_in_new_york
 
 import yfinance as yf
+import pydantic
 
 from earnings_cache import EarningsCache
 
@@ -57,6 +58,7 @@ SKIP_EARNINGS_CONFLICT = "earnings_conflict"
 SKIP_VOLUME_TOO_LOW = "volume_too_low"
 SKIP_NO_QUOTE = "no_quote"
 SKIP_NO_CHAIN = "no_chain"
+SKIP_INVALID_CHAIN = "invalid_chain_data"
 SKIP_BOTH_LEGS_REQUIRED = "both_legs_required"
 SKIP_BELOW_FF_THRESHOLD = "below_ff_threshold"
 
@@ -1279,30 +1281,44 @@ async def scan(session: Session, tickers: List[str], pairs: List[Tuple[int, int]
                 option_volume = None
 
         # 3) Chain (nested) - handle futures vs equity
-        if is_futures_symbol(sym):
-            # For futures, use NestedFutureOptionChain and extract option_chains
-            futures_chain = NestedFutureOptionChain.get(session, sym)
-            if not futures_chain or not futures_chain.option_chains:
-                skip_stats[SKIP_NO_CHAIN] += 1
-                market_logger.debug(f"{sym}: Skipping - {SKIP_NO_CHAIN}")
-                if verbose:
-                    market_logger.info(f"{sym}: SKIP - No option chain available (futures)")
-                else:
-                    market_logger.warning(f"{sym}: No option chain, skipping")
-                continue
-            chain = futures_chain.option_chains[0]  # Get the first option chain
-        else:
-            # For equity, use NestedOptionChain
-            chain_list = NestedOptionChain.get(session, sym)
-            if not chain_list:
-                skip_stats[SKIP_NO_CHAIN] += 1
-                market_logger.debug(f"{sym}: Skipping - {SKIP_NO_CHAIN}")
-                if verbose:
-                    market_logger.info(f"{sym}: SKIP - No option chain available")
-                else:
-                    market_logger.warning(f"{sym}: No option chain, skipping")
-                continue
-            chain = chain_list[0]  # API returns a list; take first element
+        try:
+            if is_futures_symbol(sym):
+                # For futures, use NestedFutureOptionChain and extract option_chains
+                futures_chain = NestedFutureOptionChain.get(session, sym)
+                if not futures_chain or not futures_chain.option_chains:
+                    skip_stats[SKIP_NO_CHAIN] += 1
+                    market_logger.debug(f"{sym}: Skipping - {SKIP_NO_CHAIN}")
+                    if verbose:
+                        market_logger.info(f"{sym}: SKIP - No option chain available (futures)")
+                    else:
+                        market_logger.warning(f"{sym}: No option chain, skipping")
+                    continue
+                chain = futures_chain.option_chains[0]  # Get the first option chain
+            else:
+                # For equity, use NestedOptionChain
+                chain_list = NestedOptionChain.get(session, sym)
+                if not chain_list:
+                    skip_stats[SKIP_NO_CHAIN] += 1
+                    market_logger.debug(f"{sym}: Skipping - {SKIP_NO_CHAIN}")
+                    if verbose:
+                        market_logger.info(f"{sym}: SKIP - No option chain available")
+                    else:
+                        market_logger.warning(f"{sym}: No option chain, skipping")
+                    continue
+                chain = chain_list[0]  # API returns a list; take first element
+        except pydantic.ValidationError as e:
+            skip_stats[SKIP_INVALID_CHAIN] += 1
+            market_logger.debug(f"{sym}: Skipping - {SKIP_INVALID_CHAIN}")
+            if verbose:
+                market_logger.info(f"{sym}: SKIP - Invalid option chain data (Pydantic validation failed)")
+            else:
+                market_logger.warning(f"{sym}: Invalid option chain data (Pydantic validation failed), skipping")
+            continue
+        except Exception as e:
+            skip_stats[SKIP_NO_CHAIN] += 1
+            market_logger.debug(f"{sym}: Skipping - {SKIP_NO_CHAIN}")
+            market_logger.error(f"{sym}: Failed to fetch option chain ({type(e).__name__}: {e}), skipping")
+            continue
 
         # Pre-index expirations by date for fast lookup
         exp_by_date = {exp.expiration_date: exp for exp in chain.expirations}

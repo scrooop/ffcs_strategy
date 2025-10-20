@@ -160,7 +160,11 @@ def setup_logging(mode: str, log_file: Optional[str] = None) -> logging.Logger:
     scanner_logger.propagate = False  # Don't propagate to root logger
 
     # Set level based on mode
-    if mode == "quiet":
+    # If log_file is provided, set logger to DEBUG so file handler receives all messages
+    # Console handler will still filter based on mode
+    if log_file:
+        scanner_logger.setLevel(logging.DEBUG)  # Logger must accept all levels for file
+    elif mode == "quiet":
         scanner_logger.setLevel(logging.ERROR)
     elif mode == "debug":
         scanner_logger.setLevel(logging.DEBUG)
@@ -169,6 +173,14 @@ def setup_logging(mode: str, log_file: Optional[str] = None) -> logging.Logger:
 
     # Create console handler
     console = logging.StreamHandler(sys.stderr)
+
+    # Set console handler level based on mode (independent of logger level)
+    if mode == "quiet":
+        console.setLevel(logging.ERROR)
+    elif mode == "debug":
+        console.setLevel(logging.DEBUG)
+    else:  # normal, verbose
+        console.setLevel(logging.INFO)
 
     # Choose formatter based on mode
     if mode == "debug":

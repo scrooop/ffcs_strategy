@@ -251,4 +251,41 @@ Exact column order from scanner code (lines 1708-1729):
 - Greeks IV primary throughout
 - Examples updated (removed deprecated flags)
 
-**Next: Phase 4 - Validation**
+**Phase 4: Validation (COMPLETED)**
+
+**Validation Checks:**
+
+1. **Column Count Verification:**
+   - CLAUDE.md: "39 Columns" reference found ✅
+   - README_TT.md: "39-Column" reference found ✅
+   - CLAUDE.md complete column order: 39 columns verified ✅
+   - README_TT.md complete column order: 39 columns verified ✅
+
+2. **CLI Flag Consistency:**
+   - Deprecated flags NOT in usage examples (CLAUDE.md) ✅
+   - Deprecated flags NOT in usage examples (README_TT.md) ✅
+   - Deprecated flags only mentioned in Migration Guide (documentation) ✅
+
+3. **Key Sections Existence:**
+   - CLAUDE.md: Migration Guide present ✅
+   - CLAUDE.md: Troubleshooting section present ✅
+   - CLAUDE.md: Version History present ✅
+   - README_TT.md: 39-Column Schema present ✅
+   - README_TT.md: Version History present ✅
+
+4. **Content Consistency:**
+   - Both files use "50Δ" for ATM strike selection ✅
+   - Both files use "atm_ff" for ATM structure ✅
+   - Both files use "min_ff" for double structure ✅
+   - Both files use "avg_options_volume_20d" (renamed column) ✅
+   - Both files document Greeks IV as primary ✅
+
+5. **Schema Accuracy:**
+   - CLAUDE.md: 39-column order complete and correct ✅
+   - README_TT.md: 39-column order complete and correct ✅
+   - Column names match between files ✅
+   - Structure-specific columns documented correctly ✅
+
+**Validation Result: PASS ✅**
+
+All documentation updates are accurate, consistent, and complete.

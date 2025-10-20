@@ -1,6 +1,6 @@
-# FF Scanner v2.1 - Forward Factor Calendar Spread Scanner
+# FF Scanner v2.2 - Forward Factor Calendar Spread Scanner
 
-**Version**: 2.1
+**Version**: 2.2
 **Last Updated**: October 20, 2025
 
 ## Table of Contents
@@ -23,25 +23,28 @@
 The FF Scanner is a production-ready CLI tool that scans liquid options to identify mispriced forward volatility opportunities for calendar spread trading. It uses the **tastytrade API** (official Python SDK) and **dxFeed Greeks streamer** to compute Forward IV and Forward Factor ratios.
 
 **What it does:**
-- Fetches ATM and ±35Δ implied volatilities from dxFeed Greeks
+- Fetches 50Δ ATM and ±35Δ implied volatilities from dxFeed Greeks (PRIMARY source)
 - Computes Forward IV using variance decomposition: `FwdIV = sqrt((T2*IV2² - T1*IV1²)/(T2 - T1))`
 - Calculates Forward Factor: `FF = (Front_IV - Fwd_IV) / Fwd_IV`
-- Filters for earnings conflicts, liquidity, and delta targets
+- Filters for earnings conflicts, volume, and delta targets
 - Outputs both ATM call calendars and double calendars (±35Δ)
-- Supports X-earn IV (earnings-removed implied volatility) with graceful fallback to Greeks IV
+- Greeks IV primary, X-earn IV rare fallback (graceful degradation)
+
+**v2.2 Enhancements (Core Calculation Corrections):**
+- ✅ **50Δ ATM Strike Selection**: Delta-based ATM selection (0.50 absolute delta) instead of spot-based
+- ✅ **Simplified ATM FF Calculation**: Single `atm_ff` using averaged IVs (replaces dual call_ff/put_ff)
+- ✅ **Min-Gating for Double Calendars**: `min_ff` column for conservative worst-case filtering
+- ✅ **Volume-Based Liquidity**: Transparent avg_options_volume_20d replaces opaque rating system
+- ✅ **Enhanced CSV Output**: 39-column schema (31 → 39, +9 columns)
 
 **v2.1 Enhancements:**
 - ✅ **Fast Earnings Check**: 80-95% runtime reduction with SQLite cache (1000 symbols: 8min → <30s)
 - ✅ **Multi-Source Earnings Pipeline**: Cache → Yahoo Finance → TastyTrade with graceful degradation
 - ✅ **Futures Options Support**: Scan futures symbols like /ES, /GC, /NQ, /CL
-- ✅ **CLI Bug Fix**: `--allow-earnings` flag now works correctly
 
 **v2.0 Enhancements:**
 - ✅ **Earnings Filtering**: Automatically skip positions with earnings between today and back expiry
-- ✅ **Volume Filtering**: Filter by average options volume (transparent threshold)
-- ✅ **X-earn IV Support**: Use earnings-removed IV when available, fall back to Greeks IV (works for both ATM and double calendars)
 - ✅ **Double Calendar Scanning**: Find ±35Δ strikes for call and put calendars (requires BOTH legs)
-- ✅ **Enhanced CSV Output**: 30-column schema with call/put-specific IVs, timestamps, deltas, and IV sources
 - ✅ **Flexible Structure Selection**: Scan ATM-only, double-only, or both simultaneously
 
 ---
@@ -207,14 +210,13 @@ python scripts/ff_tastytrade_scanner.py \
 
 ### Example 4: Allow Trading Through Earnings
 
-Disable earnings filtering (use X-earn IV for earnings-adjusted FF calculations):
+Disable earnings filtering (for earnings-aware strategies):
 
 ```bash
 python scripts/ff_tastytrade_scanner.py \
   --tickers AAPL \
   --pairs 30-90 \
-  --allow-earnings \
-  --use-xearn-iv
+  --allow-earnings
 ```
 
 ### Example 5: Debug Why Symbol Was Filtered
@@ -276,14 +278,13 @@ python scripts/ff_tastytrade_scanner.py \
 - `50000`: High volume (≈50k+ contracts/day) - Use for large positions
 - `5`: Extremely liquid (≈100k+ contracts/day)
 
-### X-earn IV Support
+### IV Source (v2.2)
 
-| Flag | Type | Default | Description |
-|------|------|---------|-------------|
-| `--use-xearn-iv` | flag | **True** | Try to use X-earn IV (earnings-removed implied volatility) from Market Metrics API. Falls back to Greeks IV if unavailable. |
-| `--force-greeks-iv` | flag | `False` | Force use of Greeks IV instead of X-earn IV (for testing/comparison). |
-
-**Mutually Exclusive:** Cannot use both `--use-xearn-iv` and `--force-greeks-iv`.
+**Greeks IV is Primary Source:**
+- Scanner always fetches Greeks IV from dxFeed (strike-level precision)
+- X-earn IV is rare fallback when Greeks IV unavailable (expiration-level only)
+- See CSV `atm_iv_source_*` or `iv_source_*` columns for source tracking
+- No CLI flags needed - graceful degradation is automatic
 
 ### Output Options
 
@@ -330,7 +331,7 @@ Calendar spreads rely on stable forward volatility. Earnings events cause volati
 **Flags:**
 
 - **Default behavior**: Earnings filtering is enabled (no flag needed)
-- `--allow-earnings`: Disable earnings filtering (use with `--use-xearn-iv` for earnings strategies)
+- `--allow-earnings`: Disable earnings filtering (for earnings-aware strategies)
 - `--show-earnings-conflicts`: Show filtered positions with reasons (diagnostic mode)
 
 **Example Output (with `--show-earnings-conflicts`):**
@@ -349,7 +350,7 @@ Calendar spreads rely on stable forward volatility. Earnings events cause volati
 **Best Practices:**
 
 - For production scanning: Use default behavior (earnings filtering enabled)
-- For earnings strategies: Use `--allow-earnings --use-xearn-iv` to get earnings-adjusted IV
+- For earnings strategies: Use `--allow-earnings` (Greeks IV will handle this appropriately)
 - For cache issues: Delete cache (`rm .cache/earnings.db`) and let it rebuild
 
 ---
@@ -402,63 +403,6 @@ python scripts/ff_tastytrade_scanner.py --tickers SPY QQQ AAPL TSLA --min-avg-vo
 
 ---
 
-### X-earn IV Support
-
-**What is X-earn IV?**
-
-X-earn IV (earnings-removed implied volatility) is tastytrade's proprietary calculation that removes the expected earnings volatility component from standard implied volatility. This provides a cleaner measure of "normal" volatility for Forward Factor calculations.
-
-**How It Works:**
-
-1. Scanner attempts to fetch `option_expiration_implied_volatilities` from Market Metrics API
-2. If X-earn IV is available for both front and back expirations, it is used
-3. If unavailable (or flag disabled), scanner falls back to Greeks IV from dxFeed
-4. CSV output includes `iv_source_call_front`, `iv_source_call_back`, `iv_source_put_front`, `iv_source_put_back` columns to track which source was used for each leg
-
-**Graceful Fallback:**
-
-The scanner is designed to work with partial data:
-- Front expiration: X-earn IV → uses X-earn IV
-- Back expiration: X-earn IV unavailable → uses Greeks IV for back leg only
-- Both unavailable → uses Greeks IV for both legs (v1.0 behavior)
-
-**Flags:**
-
-- `--use-xearn-iv` (default): Try X-earn IV first, fall back to Greeks IV
-- `--force-greeks-iv`: Always use Greeks IV (for comparison/testing)
-
-**Example:**
-
-```bash
-# Use X-earn IV when available (default)
-python scripts/ff_tastytrade_scanner.py --tickers SPY --pairs 30-60 --use-xearn-iv
-
-# Force Greeks IV (disable X-earn IV)
-python scripts/ff_tastytrade_scanner.py --tickers SPY --pairs 30-60 --force-greeks-iv
-```
-
-**CSV Output Tracking:**
-
-The `iv_source_call_front`, `iv_source_call_back`, `iv_source_put_front`, `iv_source_put_back` columns show which IV source was used for each leg:
-- `xearn`: X-earn IV from Market Metrics API
-- `greeks`: Black-Scholes IV from dxFeed Greeks
-
-**Console Logs:**
-
-When X-earn IV is unavailable, scanner logs informational messages:
-
-```
-[INFO] SPY 30DTE: X-earn IV unavailable, using Greeks IV
-[INFO] QQQ 60DTE: X-earn IV unavailable, using Greeks IV
-```
-
-**When to Use Each:**
-
-- **X-earn IV (default)**: Best for standard scanning, especially around earnings cycles
-- **Greeks IV**: Use when comparing to v1.0 results or when X-earn IV has data quality issues
-
----
-
 ### Double Calendar Structures
 
 **What are Double Calendars?**
@@ -495,19 +439,19 @@ python scripts/ff_tastytrade_scanner.py --tickers SPY --pairs 60-90 --structure 
 python scripts/ff_tastytrade_scanner.py --tickers SPY --pairs 60-90 --structure double --delta-tolerance 0.08
 ```
 
-**Combined FF Calculation:**
+**Forward Factor Calculation (v2.2):**
 
-For double calendars:
+**For double calendars:**
 - `call_ff` = Forward Factor for call leg (from +35Δ strike IVs)
 - `put_ff` = Forward Factor for put leg (from -35Δ strike IVs)
-- `combined_ff` = (call_ff + put_ff) / 2 (average of both legs)
+- `min_ff` = min(call_ff, put_ff) - PRIMARY filtering metric (conservative worst-case)
+- `combined_ff` = (call_ff + put_ff) / 2 - secondary ranking metric
 
-For ATM calendars:
-- `call_ff` = Forward Factor from call at ATM strike
-- `put_ff` = Forward Factor from put at ATM strike
-- `combined_ff` = (call_ff + put_ff) / 2 (average of both legs)
+**For ATM calendars:**
+- `atm_ff` = Single Forward Factor using averaged IVs from 50Δ strike - PRIMARY metric
+- Empty: `call_ff`, `put_ff`, `min_ff`, `combined_ff`
 
-The `combined_ff` column is used for sorting all results (highest first).
+Results are sorted by `atm_ff` (ATM) or `min_ff` (double) descending (highest first).
 
 **Structure Types in CSV:**
 
@@ -544,7 +488,7 @@ Double calendar scanning requires fetching Greeks for more strikes (8-12 strikes
 
 | Structure | Front IV (σ₁) | Back IV (σ₂) |
 |-----------|--------------|--------------|
-| **ATM Call Calendar** | IV from ATM strike at front expiration (average of call + put IV) | IV from ATM strike at back expiration (average of call + put IV) |
+| **ATM Call Calendar** | IV from 50Δ strike at front expiration (average of call + put IV) | IV from 50Δ strike at back expiration (average of call + put IV) |
 | **+35Δ Call Calendar** | IV from +35Δ call strike at front expiration | IV from +35Δ call strike at back expiration |
 | **−35Δ Put Calendar** | IV from −35Δ put strike at front expiration | IV from −35Δ put strike at back expiration |
 
@@ -583,26 +527,26 @@ For a 30-60 DTE calendar spread, the scanner will report **three different FF va
 
 **How the Scanner Implements This:**
 
-1. **`pick_atm_strike()`**: Finds strike closest to spot price
+1. **`pick_atm_strike()`**: Finds strike with delta closest to 50Δ (0.50 absolute delta)
 2. **`pick_delta_strike()`**: Finds strike closest to target delta (±35Δ)
 3. **`snapshot_greeks()`**: Fetches actual IV from dxFeed for each specific strike
 4. **`forward_iv()`**: Uses those strike-specific IVs (not interpolated surface values)
 5. **FF calculation**: `FF = (strike_IV_front - fwd_IV) / fwd_IV`
 
-**Key Takeaway:** When you see "front IV" and "back IV" in the documentation or CSV output, these refer to the IV **from the specific strikes being traded** (ATM for ATM calendars, ±35Δ for double calendars), not a generic market-wide implied volatility index.
+**Key Takeaway:** When you see "front IV" and "back IV" in the documentation or CSV output, these refer to the IV **from the specific strikes being traded** (50Δ for ATM calendars, ±35Δ for double calendars), not a generic market-wide implied volatility index.
 
 ---
 
 ## CSV Output Schema
 
-### 31-Column Schema (v2.1)
+### 39-Column Schema (v2.2)
 
 The scanner outputs a unified CSV schema that supports both ATM and double calendar structures. Empty columns are left blank (not "N/A" or "null").
 
-**Key Design Principle:**
-- ALL IVs are stored in call-specific and put-specific columns
-- For ATM calendars: Call and put IVs are from the SAME strike (may differ slightly)
-- For double calendars: Call and put IVs are from DIFFERENT strikes (+35Δ vs -35Δ)
+**Key Design Principle (v2.2):**
+- Structure-specific columns: ATM uses `atm_*` columns, double uses `call_*/put_*` columns
+- For ATM calendars: Single `atm_ff` forward factor using averaged IVs from 50Δ strike
+- For double calendars: Separate `call_ff` and `put_ff` from ±35Δ strikes, with `min_ff` for filtering
 - This design provides maximum transparency and consistency across structures
 
 | Column | Type | Description | ATM Calendar | Double Calendar |
@@ -610,70 +554,83 @@ The scanner outputs a unified CSV schema that supports both ATM and double calen
 | `timestamp` | ISO 8601 | UTC timestamp when scan was run (RFC 3339: "+00:00" suffix) | ✅ | ✅ |
 | `symbol` | string | Ticker symbol (e.g., "SPY") | ✅ | ✅ |
 | `structure` | enum | `atm-call` or `double` | ✅ | ✅ |
-| `call_ff` | float | Forward Factor for call leg | ✅ | ✅ |
-| `put_ff` | float | Forward Factor for put leg | ✅ | ✅ |
-| `combined_ff` | float | Average of call_ff and put_ff (primary sorting metric) | ✅ | ✅ |
 | `spot_price` | float | Underlying last price | ✅ | ✅ |
 | `front_dte` | int | Front leg days to expiration | ✅ | ✅ |
 | `back_dte` | int | Back leg days to expiration | ✅ | ✅ |
 | `front_expiry` | date | Front leg expiration date (YYYY-MM-DD) | ✅ | ✅ |
 | `back_expiry` | date | Back leg expiration date (YYYY-MM-DD) | ✅ | ✅ |
-| `atm_strike` | float | ATM strike price (same for call and put) | ✅ | *(empty)* |
+| `atm_strike` | float | Strike with delta closest to 50Δ (0.50 absolute delta) | ✅ | *(empty)* |
+| `atm_delta` | float | Actual absolute delta of selected ATM strike | ✅ | *(empty)* |
+| `atm_ff` | float | Single forward factor for ATM calendar (PRIMARY metric) | ✅ | *(empty)* |
+| `atm_iv_front` | float | Average IV at ATM strike (front expiration) | ✅ | *(empty)* |
+| `atm_iv_back` | float | Average IV at ATM strike (back expiration) | ✅ | *(empty)* |
+| `atm_fwd_iv` | float | Forward IV between front and back (ATM) | ✅ | *(empty)* |
+| `atm_iv_source_front` | enum | IV source for front: `greeks` or `exearn_fallback` | ✅ | *(empty)* |
+| `atm_iv_source_back` | enum | IV source for back: `greeks` or `exearn_fallback` | ✅ | *(empty)* |
 | `call_strike` | float | +35Δ call strike for double calendar | *(empty)* | ✅ |
 | `put_strike` | float | -35Δ put strike for double calendar | *(empty)* | ✅ |
 | `call_delta` | float | Actual delta of call strike | *(empty)* | ✅ |
 | `put_delta` | float | Actual delta of put strike | *(empty)* | ✅ |
+| `call_ff` | float | Forward Factor for call leg | *(empty)* | ✅ |
+| `put_ff` | float | Forward Factor for put leg | *(empty)* | ✅ |
+| `min_ff` | float | Minimum of (call_ff, put_ff) - PRIMARY filtering metric | *(empty)* | ✅ |
+| `combined_ff` | float | Average of (call_ff, put_ff) - secondary ranking metric | *(empty)* | ✅ |
 | `call_front_iv` | float | Call IV at front expiration (decimal: 0.25 = 25%) | ✅ | ✅ |
 | `call_back_iv` | float | Call IV at back expiration | ✅ | ✅ |
 | `call_fwd_iv` | float | Forward IV for call leg (computed) | ✅ | ✅ |
 | `put_front_iv` | float | Put IV at front expiration | ✅ | ✅ |
 | `put_back_iv` | float | Put IV at back expiration | ✅ | ✅ |
 | `put_fwd_iv` | float | Forward IV for put leg (computed) | ✅ | ✅ |
+| `iv_source_call_front` | enum | Call IV source for front: `greeks` or `exearn_fallback` | *(empty)* | ✅ |
+| `iv_source_call_back` | enum | Call IV source for back: `greeks` or `exearn_fallback` | *(empty)* | ✅ |
+| `iv_source_put_front` | enum | Put IV source for front: `greeks` or `exearn_fallback` | *(empty)* | ✅ |
+| `iv_source_put_back` | enum | Put IV source for back: `greeks` or `exearn_fallback` | *(empty)* | ✅ |
 | `earnings_conflict` | enum | `yes` or `no` | ✅ | ✅ |
 | `earnings_date` | date | Expected earnings report date (YYYY-MM-DD, empty if none) | ✅ | ✅ |
-| `avg_options_volume` | float | Average options volume (from liquidity_value field) | ✅ | ✅ |
-| `iv_source_call_front` | enum | Call IV source for front expiration: `xearn` or `greeks` | ✅ | ✅ |
-| `iv_source_call_back` | enum | Call IV source for back expiration: `xearn` or `greeks` | ✅ | ✅ |
-| `iv_source_put_front` | enum | Put IV source for front expiration: `xearn` or `greeks` | ✅ | ✅ |
-| `iv_source_put_back` | enum | Put IV source for back expiration: `xearn` or `greeks` | ✅ | ✅ |
+| `avg_options_volume_20d` | float | Average options volume over 20 days (from liquidity_value field) | ✅ | ✅ |
 | `earnings_source` | enum | Earnings data source: `cache`, `yahoo`, `tastytrade`, `none`, or `skipped` | ✅ | ✅ |
+| `skip_reason` | string | Reason symbol was filtered (e.g., "earnings_conflict", "volume_too_low", empty if not skipped) | ✅ | ✅ |
 
-### Example CSV Output
+**Complete Column Order (39 columns):**
+`timestamp`, `symbol`, `structure`, `spot_price`, `front_dte`, `back_dte`, `front_expiry`, `back_expiry`, `atm_strike`, `atm_delta`, `atm_ff`, `atm_iv_front`, `atm_iv_back`, `atm_fwd_iv`, `atm_iv_source_front`, `atm_iv_source_back`, `call_strike`, `put_strike`, `call_delta`, `put_delta`, `call_ff`, `put_ff`, `min_ff`, `combined_ff`, `call_front_iv`, `call_back_iv`, `call_fwd_iv`, `put_front_iv`, `put_back_iv`, `put_fwd_iv`, `iv_source_call_front`, `iv_source_call_back`, `iv_source_put_front`, `iv_source_put_back`, `earnings_conflict`, `earnings_date`, `avg_options_volume_20d`, `earnings_source`, `skip_reason`
+
+### Example CSV Output (v2.2)
 
 **ATM Call Calendar:**
 
 ```csv
-timestamp,symbol,structure,call_ff,put_ff,combined_ff,spot_price,front_dte,back_dte,front_expiry,back_expiry,atm_strike,call_strike,put_strike,call_delta,put_delta,call_front_iv,call_back_iv,call_fwd_iv,put_front_iv,put_back_iv,put_fwd_iv,earnings_conflict,earnings_date,avg_options_volume,iv_source_call_front,iv_source_call_back,iv_source_put_front,iv_source_put_back,earnings_source
-2025-10-19T14:30:00+00:00,SPY,atm-call,0.166234,0.165890,0.166062,580.50,30,60,2025-11-18,2025-12-18,580.00,,,,,0.185432,0.172145,0.158967,0.185001,0.171890,0.158745,no,,117690.89,xearn,xearn,xearn,xearn,cache
+timestamp,symbol,structure,spot_price,front_dte,back_dte,front_expiry,back_expiry,atm_strike,atm_delta,atm_ff,atm_iv_front,atm_iv_back,atm_fwd_iv,atm_iv_source_front,atm_iv_source_back,call_strike,put_strike,call_delta,put_delta,call_ff,put_ff,min_ff,combined_ff,call_front_iv,call_back_iv,call_fwd_iv,put_front_iv,put_back_iv,put_fwd_iv,iv_source_call_front,iv_source_call_back,iv_source_put_front,iv_source_put_back,earnings_conflict,earnings_date,avg_options_volume_20d,earnings_source,skip_reason
+2025-10-19T14:30:00+00:00,SPY,atm-call,580.50,30,60,2025-11-18,2025-12-18,580.00,0.498,0.166,0.185,0.172,0.159,greeks,greeks,,,,,,,,0.185,0.172,0.159,0.185,0.172,0.159,,,,,no,,117690.89,cache,
 ```
 
 **Double Calendar:**
 
 ```csv
-timestamp,symbol,structure,call_ff,put_ff,combined_ff,spot_price,front_dte,back_dte,front_expiry,back_expiry,atm_strike,call_strike,put_strike,call_delta,put_delta,call_front_iv,call_back_iv,call_fwd_iv,put_front_iv,put_back_iv,put_fwd_iv,earnings_conflict,earnings_date,avg_options_volume,iv_source_call_front,iv_source_call_back,iv_source_put_front,iv_source_put_back,earnings_source
-2025-10-19T14:30:00+00:00,SPY,double,0.177123,0.167523,0.172323,580.50,30,60,2025-11-18,2025-12-18,,595.00,565.00,0.3498,-0.3512,0.192456,0.175234,0.163512,0.188234,0.173456,0.161234,no,,117690.89,greeks,greeks,greeks,greeks,yahoo
+timestamp,symbol,structure,spot_price,front_dte,back_dte,front_expiry,back_expiry,atm_strike,atm_delta,atm_ff,atm_iv_front,atm_iv_back,atm_fwd_iv,atm_iv_source_front,atm_iv_source_back,call_strike,put_strike,call_delta,put_delta,call_ff,put_ff,min_ff,combined_ff,call_front_iv,call_back_iv,call_fwd_iv,put_front_iv,put_back_iv,put_fwd_iv,iv_source_call_front,iv_source_call_back,iv_source_put_front,iv_source_put_back,earnings_conflict,earnings_date,avg_options_volume_20d,earnings_source,skip_reason
+2025-10-19T14:30:00+00:00,SPY,double,580.50,30,60,2025-11-18,2025-12-18,,,,,,,, 595.00,565.00,0.3498,-0.3512,0.177,0.168,0.168,0.172,0.192,0.175,0.164,0.188,0.173,0.161,greeks,greeks,greeks,greeks,no,,117690.89,yahoo,
 ```
 
-**Key Differences:**
-- **ATM Calendar:** `atm_strike` populated, `call_strike` and `put_strike` empty, call/put IVs from SAME strike
-- **Double Calendar:** `call_strike` and `put_strike` populated, `atm_strike` empty, call/put IVs from DIFFERENT strikes
-- **X-earn IV:** ATM calendar shows `xearn` for all IV sources (when available)
-- **Greeks IV:** Double calendar shows `greeks` (X-earn IV works for double calendars too, this example just shows Greeks)
-- **Earnings Source (v2.1):** ATM calendar shows `cache` (instant lookup), double calendar shows `yahoo` (fresh fetch)
+**Key Differences (v2.2):**
+- **ATM Calendar:** `atm_*` columns populated (including `atm_ff`), `call_*/put_*` structure columns empty
+- **Double Calendar:** `call_*/put_*` structure columns populated (including `min_ff`, `combined_ff`), `atm_*` columns empty
+- **IV Sources:** Typically `greeks` (primary), rare `exearn_fallback` if Greeks unavailable
+- **Earnings Source:** `cache` (instant lookup), `yahoo` (fresh fetch), or `tastytrade` (fallback)
+- **Skip Reason:** Empty for included symbols, reason code for filtered symbols
 
-### Sorting
+### Sorting (v2.2)
 
 Results are sorted by:
-1. `combined_ff` descending (highest Forward Factor first)
-2. `symbol` ascending (alphabetical for ties)
+1. **ATM calendars:** `atm_ff` descending (highest Forward Factor first)
+2. **Double calendars:** `min_ff` descending (conservative worst-case filtering)
+3. `symbol` ascending (alphabetical for ties)
 
 ### Null Handling
 
 Structure-specific columns are left **empty** (not "N/A" or "null") when not applicable:
-- **ATM calendars:** `call_strike`, `put_strike`, `call_delta`, `put_delta` are empty
-- **Double calendars:** `atm_strike` is empty
+- **ATM calendars:** `call_strike`, `put_strike`, `call_delta`, `put_delta`, `call_ff`, `put_ff`, `min_ff`, `combined_ff`, `iv_source_call_*`, `iv_source_put_*` are empty
+- **Double calendars:** `atm_strike`, `atm_delta`, `atm_ff`, `atm_iv_*`, `atm_iv_source_*` are empty
 
-Note: All other columns are populated for both structures. The key difference is which strike columns are used.
+Note: All other columns (spot_price, DTE, expirations, IV details, earnings, volume, skip_reason) are populated for both structures.
 
 ---
 
@@ -860,14 +817,14 @@ python scripts/ff_tastytrade_scanner.py --tickers SPY --pairs 30-60 --dte-tolera
 - Scanner allows position through (fail-safe behavior)
 - If persistent, check tastytrade API status
 
-#### 5. "X-earn IV unavailable, using Greeks IV"
+#### 5. "Ex-earn IV fallback" warnings in logs
 
-**Cause:** Market Metrics API doesn't have X-earn IV for this expiration.
+**Cause:** Greeks IV missing/invalid for a specific leg, using ex-earn IV fallback.
 
 **Solutions:**
-- This is informational, not an error - scan continues
-- Scanner automatically falls back to Greeks IV (v1.0 behavior)
-- If you prefer to force Greeks IV always: Use `--force-greeks-iv`
+- This is informational, not an error - scan continues (rare graceful degradation)
+- Scanner uses ex-earn IV as fallback when Greeks IV unavailable
+- Check `atm_iv_source_*` or `iv_source_*` CSV columns to verify source
 
 #### 6. Scanner returns 0 results
 
@@ -985,30 +942,7 @@ python scripts/ff_tastytrade_scanner.py \
 
 **Output:** File like `251019_0945_ff_scan.csv` with timestamped opportunities.
 
-### Example 2: Compare X-earn IV vs Greeks IV
-
-Run two scans and compare results:
-
-```bash
-# Scan 1: X-earn IV (default)
-python scripts/ff_tastytrade_scanner.py \
-  --tickers SPY QQQ \
-  --pairs 30-60 \
-  --use-xearn-iv \
-  --csv-out xearn_scan.csv
-
-# Scan 2: Greeks IV (forced)
-python scripts/ff_tastytrade_scanner.py \
-  --tickers SPY QQQ \
-  --pairs 30-60 \
-  --force-greeks-iv \
-  --csv-out greeks_scan.csv
-
-# Compare results in spreadsheet or with diff tool
-diff xearn_scan.csv greeks_scan.csv
-```
-
-### Example 3: Aggressive Scan for Research
+### Example 2: Aggressive Scan for Research
 
 Lower all thresholds to capture more data:
 
@@ -1207,6 +1141,7 @@ python -m pip uninstall tastytrade
 
 ## Version History
 
+- **v2.2** (October 2025): Core calculation corrections - 50Δ ATM strike selection, simplified ATM FF calculation (single atm_ff), double calendar min-gating (min_ff column), volume-based liquidity (avg_options_volume_20d), 39-column CSV schema (+9 columns)
 - **v2.1** (October 2025): Fast earnings check with caching (80-95% runtime reduction), multi-source earnings pipeline (Cache → Yahoo → TastyTrade), 31-column CSV schema with earnings_source tracking, CLI cleanup
 - **v2.0** (October 2025): Earnings filtering, liquidity screening, X-earn IV support, double calendar scanning, enhanced CSV output (28 columns)
 - **v1.0** (Initial release): ATM calendar scanning with Forward Factor calculation

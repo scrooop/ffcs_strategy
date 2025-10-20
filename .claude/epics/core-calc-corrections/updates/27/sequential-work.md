@@ -178,4 +178,77 @@ Exact column order from scanner code (lines 1708-1729):
 - Troubleshooting covers common issues
 - Version history comprehensive
 
-**Next: Phase 3 - Update README_TT.md**
+**Phase 3: Update README_TT.md (COMPLETED)**
+
+**Changes Applied:**
+
+1. **Version Header** (lines 1-4):
+   - Updated: "FF Scanner v2.1" → "FF Scanner v2.2"
+   - Last Updated: October 20, 2025
+
+2. **Overview Section** (lines 25-48):
+   - Updated "What it does": 50Δ ATM, Greeks IV primary
+   - Added v2.2 enhancements section (5 bullets)
+   - Condensed v2.0 enhancements (removed X-earn IV details)
+
+3. **Command Line Flags - IV Source** (lines 282-288):
+   - Removed X-earn IV flags table (--use-xearn-iv, --force-greeks-iv)
+   - Replaced with "IV Source (v2.2)" section explaining Greeks primary
+
+4. **Feature Details - Earnings Filtering** (lines 333, 353):
+   - Updated flags description: removed X-earn IV reference
+   - Updated best practices: Greeks IV handles earnings appropriately
+
+5. **Feature Details - X-earn IV Section** (lines 404):
+   - Removed entire "X-earn IV Support" section (58 lines)
+   - No longer applicable (Greeks is primary, X-earn is rare fallback)
+
+6. **Feature Details - Double Calendar FF Calculation** (lines 442-454):
+   - Updated to v2.2: Single atm_ff for ATM, min_ff for doubles
+   - Added sorting description (atm_ff or min_ff descending)
+   - Clarified empty columns per structure
+
+7. **Feature Details - IV Variation Tables** (lines 491-493, 530-536):
+   - Updated ATM references: "ATM strike" → "50Δ strike"
+   - Updated pick_atm_strike() description: "closest to spot" → "delta closest to 50Δ"
+   - Updated key takeaway: "ATM for ATM calendars" → "50Δ for ATM calendars"
+
+8. **CSV Output Schema** (lines 600-653):
+   - Updated header: "31-Column Schema (v2.1)" → "39-Column Schema (v2.2)"
+   - Reorganized table: 39 rows with structure-specific columns
+   - Added ATM columns: atm_strike, atm_delta, atm_ff, atm_iv_*, atm_iv_source_*
+   - Added double columns: min_ff, skip_reason
+   - Renamed: avg_options_volume → avg_options_volume_20d
+   - Updated Primary metrics: atm_ff (ATM), min_ff (double)
+   - Added complete column order (39 columns)
+
+9. **CSV Examples & Sorting** (lines 655-691):
+   - Updated ATM example: Full 39-column CSV with atm_* columns populated
+   - Updated double example: Full 39-column CSV with call/put columns populated
+   - Updated key differences: v2.2 structure-specific columns
+   - Updated sorting: atm_ff (ATM) or min_ff (double) descending
+   - Updated null handling: Detailed empty column lists per structure
+
+10. **Basic Usage Examples** (lines 211-220):
+    - Example 4: Removed --use-xearn-iv flag reference
+    - Updated description: "for earnings-aware strategies"
+
+11. **Advanced Examples** (lines 945):
+    - Removed "Example 2: Compare X-earn IV vs Greeks IV" (entire section)
+    - Renumbered remaining examples (no changes needed, already sequential)
+
+12. **Troubleshooting** (lines 820-827):
+    - Updated issue #5: "X-earn IV unavailable" → "Ex-earn IV fallback warnings"
+    - Updated description: Rare graceful degradation, check CSV columns
+
+13. **Version History** (line 1225):
+    - Added v2.2 entry: Core calculation corrections with key features
+
+**Verification:**
+- All v2.2 changes documented
+- 39 columns confirmed in schema section
+- X-earn IV references removed (now rare fallback)
+- Greeks IV primary throughout
+- Examples updated (removed deprecated flags)
+
+**Next: Phase 4 - Validation**

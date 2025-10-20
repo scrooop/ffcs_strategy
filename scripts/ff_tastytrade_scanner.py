@@ -749,7 +749,7 @@ async def scan(session: Session, tickers: List[str], pairs: List[Tuple[int, int]
         delta_tolerance: Max delta deviation for double calendars (default 0.05 = ±5Δ)
 
     Returns:
-        List of dict rows with 28-column unified CSV schema:
+        List of dict rows with 30-column unified CSV schema:
         - timestamp, symbol, structure
         - call_ff, put_ff, combined_ff (FF metrics - primary sort key)
         - spot_price, front_dte, back_dte, front_expiry, back_expiry
@@ -1338,7 +1338,7 @@ Examples:
         delta_tolerance=args.delta_tolerance
     ))
 
-    # Unified 28-column CSV schema
+    # Unified 30-column CSV schema
     cols = [
         "timestamp", "symbol", "structure",
         "call_ff", "put_ff", "combined_ff",

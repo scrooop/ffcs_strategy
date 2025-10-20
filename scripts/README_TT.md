@@ -1,6 +1,6 @@
 # FF Scanner v2.1 - Forward Factor Calendar Spread Scanner
 
-**Version**: 2.0
+**Version**: 2.1
 **Last Updated**: October 19, 2025
 
 ## Table of Contents
@@ -39,7 +39,7 @@ The FF Scanner is a production-ready CLI tool that scans liquid options to ident
 - ✅ **Liquidity Screening**: Filter by tastytrade liquidity rating (0-5 scale)
 - ✅ **X-earn IV Support**: Use earnings-removed IV when available, fall back to Greeks IV (works for both ATM and double calendars)
 - ✅ **Double Calendar Scanning**: Find ±35Δ strikes for call and put calendars (requires BOTH legs)
-- ✅ **Enhanced CSV Output**: 28-column schema with call/put-specific IVs, timestamps, deltas, and IV sources
+- ✅ **Enhanced CSV Output**: 30-column schema with call/put-specific IVs, timestamps, deltas, and IV sources
 - ✅ **Flexible Structure Selection**: Scan ATM-only, double-only, or both simultaneously
 
 ---
@@ -368,7 +368,7 @@ X-earn IV (earnings-removed implied volatility) is tastytrade's proprietary calc
 1. Scanner attempts to fetch `option_expiration_implied_volatilities` from Market Metrics API
 2. If X-earn IV is available for both front and back expirations, it is used
 3. If unavailable (or flag disabled), scanner falls back to Greeks IV from dxFeed
-4. CSV output includes `iv_source_front` and `iv_source_back` columns to track which source was used
+4. CSV output includes `iv_source_call_front`, `iv_source_call_back`, `iv_source_put_front`, `iv_source_put_back` columns to track which source was used for each leg
 
 **Graceful Fallback:**
 
@@ -394,7 +394,7 @@ python scripts/ff_tastytrade_scanner.py --tickers SPY --pairs 30-60 --force-gree
 
 **CSV Output Tracking:**
 
-The `iv_source_front` and `iv_source_back` columns show which IV source was used:
+The `iv_source_call_front`, `iv_source_call_back`, `iv_source_put_front`, `iv_source_put_back` columns show which IV source was used for each leg:
 - `xearn`: X-earn IV from Market Metrics API
 - `greeks`: Black-Scholes IV from dxFeed Greeks
 
@@ -550,7 +550,7 @@ For a 30-60 DTE calendar spread, the scanner will report **three different FF va
 
 ## CSV Output Schema
 
-### 28-Column Schema (v2.0)
+### 30-Column Schema (v2.1)
 
 The scanner outputs a unified CSV schema that supports both ATM and double calendar structures. Empty columns are left blank (not "N/A" or "null").
 
@@ -980,7 +980,10 @@ python scripts/ff_tastytrade_scanner.py \
 - **Equity Indexes:** `/ES`, `/NQ`, `/RTY`, `/MES`, `/MNQ` ✅
 - **Commodities:** `/GC` (Gold), `/CL` (Crude Oil), `/MCL` (Micro Crude) ✅
 
-**Note:** All supported futures have 30-60 day options. Other futures like /SI, /ZB, /NG either have no chains or non-standard expirations.
+**Partially Supported (chains exist but non-standard expirations):**
+- `/NG`, `/LE`, `/6A`, `/6B`, `/6C`, `/6E`, `/6J`, `/BTC`, `/ETH` - May work with different DTE pairs
+
+**Note:** Many futures only have monthly/quarterly options, which don't match standard 30-60 DTE pairs. Other futures like /SI, /ZB, /ZN, /ZF, /ZT, /ZC, /ZS, /ZW, /HG, /HE, /SR3 have no option chains on tastytrade.
 
 ```bash
 # Scan major equity index futures
@@ -1087,7 +1090,8 @@ python -m pip uninstall tastytrade
 
 ## Version History
 
-- **v2.0** (October 2025): Earnings filtering, liquidity screening, X-earn IV support, double calendar scanning, enhanced CSV output
+- **v2.1** (October 2025): Futures options support (/ES, /NQ, /RTY, /GC, /CL, etc.), CLI bug fix (--allow-earnings flag)
+- **v2.0** (October 2025): Earnings filtering, liquidity screening, X-earn IV support, double calendar scanning, enhanced 30-column CSV output
 - **v1.0** (Initial release): ATM calendar scanning with Forward Factor calculation
 
 ---

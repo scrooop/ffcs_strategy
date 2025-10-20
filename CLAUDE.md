@@ -170,7 +170,7 @@ python scripts/ff_tastytrade_scanner.py \
 - `--force-greeks-iv`: Force use of Greeks IV instead of X-earn IV
 
 **Output Options:**
-- `--csv-out`: Write results to CSV file (recommended, 25-column schema)
+- `--csv-out`: Write results to CSV file (recommended, 30-column schema)
 - `--json-out`: Write results to JSON file
 - `--sandbox`: Use sandbox environment (production required for live Greeks)
 - `--show-all-scans`: Show all scan results regardless of FF threshold (for testing)
@@ -208,7 +208,7 @@ python scripts/ff_tastytrade_scanner.py \
 **How It Works:**
 1. Scanner first attempts to fetch X-earn IV from `option_expiration_implied_volatilities` field
 2. If unavailable or expiration not found, gracefully falls back to dxFeed Greeks IV
-3. CSV output includes `iv_source_front` and `iv_source_back` columns to track data source
+3. CSV output includes `iv_source_call_front`, `iv_source_call_back`, `iv_source_put_front`, `iv_source_put_back` columns to track data source for each leg
 4. Source values: "xearn" (X-earn IV used) or "greeks" (dxFeed Greeks IV used)
 
 **Override Behavior:**
@@ -268,7 +268,7 @@ Given the same underlying and term structure, the three calendar structures will
 - `snapshot_greeks()`: Fetches actual IV from dxFeed for each specific strike
 - Forward IV calculation uses these strike-specific IVs, not interpolated surface values
 
-### CSV Output Schema (28 Columns)
+### CSV Output Schema (30 Columns)
 
 Results are sorted by `combined_ff` descending (highest opportunities first).
 

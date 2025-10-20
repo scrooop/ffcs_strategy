@@ -1,0 +1,30 @@
+Symbol,Status,Details
+------------------------------------------------------------
+/ES,✅ WORKS,Has option chain and produces results
+/NQ,✅ WORKS,Has option chain and produces results
+/RTY,✅ WORKS,Has option chain and produces results
+/GC,✅ WORKS,Has option chain and produces results
+/SI,❓ UNKNOWN,No clear status
+/CL,✅ WORKS,Has option chain and produces results
+/NG,⚠️  NO MATCH,Chain exists but no 30-60 DTE expirations
+/ZB,❓ UNKNOWN,No clear status
+/ZN,❓ UNKNOWN,No clear status
+/ZF,❓ UNKNOWN,No clear status
+/ZT,❓ UNKNOWN,No clear status
+/ZC,❓ UNKNOWN,No clear status
+/ZS,❓ UNKNOWN,No clear status
+/ZW,❓ UNKNOWN,No clear status
+/HG,❓ UNKNOWN,No clear status
+/HE,❓ UNKNOWN,No clear status
+/LE,⚠️  NO MATCH,Chain exists but no 30-60 DTE expirations
+/6A,⚠️  NO MATCH,Chain exists but no 30-60 DTE expirations
+/6B,⚠️  NO MATCH,Chain exists but no 30-60 DTE expirations
+/6C,⚠️  NO MATCH,Chain exists but no 30-60 DTE expirations
+/6E,⚠️  NO MATCH,Chain exists but no 30-60 DTE expirations
+/6J,⚠️  NO MATCH,Chain exists but no 30-60 DTE expirations
+/MES,✅ WORKS,Has option chain and produces results
+/MNQ,✅ WORKS,Has option chain and produces results
+/MCL,✅ WORKS,Has option chain and produces results
+/BTC,⚠️  NO MATCH,Chain exists but no 30-60 DTE expirations
+/ETH,⚠️  NO MATCH,Chain exists but no 30-60 DTE expirations
+/SR3,❓ UNKNOWN,No clear status

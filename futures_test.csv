@@ -1,0 +1,3 @@
+timestamp,symbol,structure,spot_price,front_dte,back_dte,front_expiry,back_expiry,atm_strike,call_strike,put_strike,call_delta,put_delta,front_iv,back_iv,fwd_iv,ff,call_ff,put_ff,combined_ff,earnings_date,earnings_conflict,liquidity_rating,liquidity_value,iv_source_front,iv_source_back
+2025-10-19T19:41:07.673806Z,/ES,double-call,65.00,33,61,2025-11-21,2025-12-19,,75.00,,0.3447,,0.243989,0.223802,0.197376,,0.236162,,0.236162,,no,3,,greeks,greeks
+2025-10-19T19:41:07.673806Z,/ES,atm-call,65.00,33,61,2025-11-21,2025-12-19,65.00,,,,,0.209625,0.214851,0.220853,-0.050839,,,-0.050839,,no,3,,xearn,xearn

@@ -8,6 +8,23 @@
 
 ---
 
+
+> **DEFINITION BOX — “Front IV” (explicit; double‑calendar method is ambiguous in source)**  
+> - **ATM Calendar:** *Front IV* = the **ATM (≈50Δ) option IV** for the **front expiry** at the **anchor strike** you will trade (same strike used in back expiry). A common robust proxy is the **ATM straddle mid‑IV** or the **50Δ call IV**—pick one and **use it consistently** across front/back expiries.  
+> - **Double Calendar (±35Δ):** The transcript does **not** specify whether to compute FF per wing or from wing averages. Use one of the two consistent rules below and keep it consistent with your thresholds:
+>   - **Option A — Per‑wing FF (strict/transparent):**  
+>     Compute IV at **+35Δ call strike** and **−35Δ put strike** for **front (T1)** and **back (T2)**. For each wing **separately**:  
+>     • Forward variance = \\((IV_{back}^2\\,T_2 - IV_{front}^2\\,T_1)/(T_2-T_1)\\) (with **T in years**).  
+>     • Forward IV = sqrt(forward variance).  
+>     • **FF_call** = \\((IV^{front}_{call} - IV^{fwd}_{call})/IV^{fwd}_{call}\\)**; **FF_put** analogously.  
+>     Apply your entry rule to **both FFs** (e.g., both ≥ threshold, or use min/avg rule you define up‑front).
+>   - **Option B — Averaged wings FF (compact/simpler):**  
+>     Average the **front wing IVs**: \\(IV^{front}_{avg} = (IV^{front}_{call}+IV^{front}_{put})/2\\).  
+>     Average the **back wing IVs** similarly. Use the averages in the forward‑variance formula to get **IV^{fwd}_{avg}**, then **FF_avg = (IV^{front}_{avg} - IV^{fwd}_{avg})/IV^{fwd}_{avg}** (single number).
+> - **Earnings (ex‑earn IV):** If scheduled earnings fall between now and either expiry and you’re **not** excluding them, use **ex‑earn IV** (earnings effect removed) for *both* expiries so the term‑structure comparison is apples‑to‑apples.
+> - **Units:** Always convert **DTE → years** for \(T_1, T_2\).
+
+
 ## 1) Executive Summary
 
 - **Edge:** Harvest **term‑structure misalignment** in implied volatility (IV). The **forward implied volatility** between two expiries is often **mispriced** relative to the front period IV. A **positive FF** (front IV \> forward IV) signals **backwardation** and a favorable setup for a **long calendar** (long forward vol).  
@@ -160,31 +177,55 @@
 
 ---
 
-## 7) Step‑by‑Step Playbook
+## 7) Step‑by‑Step Playbook (Explicit Pipelines)
 
-1) **Screen & Filter**  
-   - Symbols with **avg option volume ≥ 10k/day**.  
-   - Prefer **no earnings** from now through back expiry; else use **ex‑earn IV** consistently.
+### 7.1 Common Pre‑Checks
+1. **Liquidity filter:** underlying has **≥ 10k options/day (20‑day avg)**.  
+2. **Earnings policy:** either **exclude earnings** between entry and back expiry **or** use **ex‑earn IV** consistently.  
+3. **Pick expiries:** choose **30–60**, **30–90**, or **60–90 DTE** pairs (**±5 DTE** buffer ok). Convert DTE to **years** for \(T_1, T_2\).
 
-2) **Pick expiry pair**: **30–60**, **30–90**, or **60–90** (allow **±5 DTE** buffer).
+### 7.2 ATM Call Calendar (same‑strike ATM)
+1. **Anchor strike:** choose the **ATM (≈50Δ)** strike to be used for **both expiries**.  
+2. **Collect IVs:** read **IV_front = IV(K_{ATM}, T_1)** and **IV_back = IV(K_{ATM}, T_2)**. (Use **50Δ call IV** or **ATM straddle mid‑IV**—be consistent across both expiries and all names.)  
+3. **Compute forward vol:**  
+   \[ V_{fwd} = \frac{IV_{back}^2\,T_2 - IV_{front}^2\,T_1}{T_2 - T_1},\quad IV_{fwd} = \sqrt{V_{fwd}} \]
+4. **Forward Factor (FF):**  
+   \[ FF = \frac{IV_{front} - IV_{fwd}}{IV_{fwd}} \]
+5. **Entry filter:** Enter only if **FF ≥ threshold** for your chosen DTE pair (see Section 4).  
+6. **Build & size:** **Sell** front ATM call, **buy** back ATM call (same strike). Size **2–8%** of equity (≈**4%** default), **≤ ¼ Kelly**.  
+7. **Exit:** **Close the spread** just **before** front expiry; redeploy into next high‑FF signals.
 
-3) **Compute Forward Vol & FF**  
-   - Convert DTE to **years**. Compute \(\sigma_{fwd}\), then **FF = (front IV − σ_fwd)/σ_fwd**.
+### 7.3 Double Calendar (±35Δ wings)
+**Pick one rule and stick to it.**
 
-4) **Enter only if FF ≥ threshold**  
-   - See **Section 4**. A simple global rule is **FF ≥ 0.20**.
+**Option A — Per‑wing FF (strict/transparent):**
+1. **Anchor strikes:** determine **+35Δ call** strike \(K_c\) and **−35Δ put** strike \(K_p\) for both expiries.  
+2. **Collect IVs:**  
+   - Front: \(IV^{front}_{call} = IV(K_c, T_1),\; IV^{front}_{put} = IV(K_p, T_1)\)  
+   - Back:  \(IV^{back}_{call}  = IV(K_c, T_2),\; IV^{back}_{put}  = IV(K_p, T_2)\)  
+3. **Compute forward vols per wing:**  
+   - Call: \(V^{fwd}_{call} = (IV^{back}_{call}{}^2 T_2 - IV^{front}_{call}{}^2 T_1)/(T_2-T_1),\; IV^{fwd}_{call} = \sqrt{\cdot}\)  
+   - Put:  \(V^{fwd}_{put}  = (IV^{back}_{put}{}^2  T_2 - IV^{front}_{put}{}^2  T_1)/(T_2-T_1),\; IV^{fwd}_{put}  = \sqrt{\cdot}\)  
+4. **Compute FF per wing:**  
+   - \(FF_{call} = (IV^{front}_{call} - IV^{fwd}_{call})/IV^{fwd}_{call}\)  
+   - \(FF_{put}  = (IV^{front}_{put}  - IV^{fwd}_{put}) /IV^{fwd}_{put} \)  
+5. **Entry filter:** require your rule (e.g., **both ≥ threshold**, or **min(FF_{call}, FF_{put}) ≥ threshold**).  
+6. **Build & size:** **Sell** front +35Δ call & −35Δ put; **buy** same strikes in back. Size **2–8%**, **≤ ¼ Kelly**.  
+7. **Exit:** **Close as a spread** just **before** front expiry; redeploy.
 
-5) **Build the spread**  
-   - **ATM Calendar:** sell front ATM call, buy back ATM call (same strike).  
-   - **Double Calendar (~35Δ):** sell front +35Δ call and −35Δ put; buy same strikes in back.
+**Option B — Averaged wings FF (compact/simpler):**
+1. **Anchor strikes:** as above (\(K_c, K_p\)).  
+2. **Average IVs:**  
+   - Front average: \(IV^{front}_{avg} = (IV^{front}_{call} + IV^{front}_{put})/2\)  
+   - Back  average: \(IV^{back}_{avg}  = (IV^{back}_{call}  + IV^{back}_{put})/2\)  
+3. **Forward vol from averages:**  
+   \(V^{fwd}_{avg} = (IV^{back}_{avg}{}^2 T_2 - IV^{front}_{avg}{}^2 T_1)/(T_2-T_1),\; IV^{fwd}_{avg} = \sqrt{\cdot}\)  
+4. **FF from averages:**  
+   \(FF_{avg} = (IV^{front}_{avg} - IV^{fwd}_{avg})/IV^{fwd}_{avg}\)  
+5. **Entry filter:** **FF_{avg} ≥ threshold** for your chosen DTE pair.  
+6. **Build & size:** Construct the **double calendar** at \(K_c\) and \(K_p\); size as above.  
+7. **Exit:** **Close as a spread** just **before** front expiry; redeploy.
 
-6) **Size**  
-   - **2–8%** of equity per trade (**~4% default**), **≤ ¼ Kelly**. Rank by **highest FF** and allocate until portfolio is full.
-
-7) **Manage & Exit**  
-   - **No tweaks** needed. **Hold** and **close entire spread** **just before** front expiry. **Redeploy** into new high‑FF names.
-
----
 
 ## 8) Real Trade Example (from transcript)
 

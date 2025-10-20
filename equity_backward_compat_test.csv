@@ -1,7 +1,0 @@
-timestamp,symbol,structure,spot_price,front_dte,back_dte,front_expiry,back_expiry,atm_strike,call_strike,put_strike,call_delta,put_delta,front_iv,back_iv,fwd_iv,ff,call_ff,put_ff,combined_ff,earnings_date,earnings_conflict,liquidity_rating,liquidity_value,iv_source_front,iv_source_back
-2025-10-19T21:14:10.694434+00:00,QQQ,double-put,604.99,33,61,2025-11-21,2025-12-19,,,590.00,,-0.3506,0.231044,0.225317,0.218376,,,0.058011,0.058011,,no,4,,greeks,greeks
-2025-10-19T21:14:10.694434+00:00,SPY,double-put,664.39,33,61,2025-11-21,2025-12-19,,,652.00,,-0.3466,0.177617,0.17394,0.169504,,,0.047866,0.047866,,no,4,,greeks,greeks
-2025-10-19T21:14:10.694434+00:00,QQQ,atm-call,604.99,33,61,2025-11-21,2025-12-19,605.00,,,,,0.26201,0.26241,0.262879,-0.003306,,,-0.003306,,no,4,,xearn,xearn
-2025-10-19T21:14:10.694434+00:00,QQQ,double-call,604.99,33,61,2025-11-21,2025-12-19,,622.00,,0.3429,,0.207179,0.208349,0.20972,,-0.012119,,-0.012119,,no,4,,greeks,greeks
-2025-10-19T21:14:10.694434+00:00,SPY,double-call,664.39,33,61,2025-11-21,2025-12-19,,679.00,,0.3479,,0.158929,0.160391,0.162096,,-0.019536,,-0.019536,,no,4,,greeks,greeks
-2025-10-19T21:14:10.694434+00:00,SPY,atm-call,664.39,33,61,2025-11-21,2025-12-19,664.00,,,,,0.209779,0.219885,0.231229,-0.092765,,,-0.092765,,no,4,,xearn,xearn

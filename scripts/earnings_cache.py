@@ -11,7 +11,7 @@ dramatically speed up earnings pre-filtering in the FF calendar spread scanner.
 - Fallback data source: TastyTrade API (when Yahoo fails, optional)
 - Cache invalidation: Automatic re-fetch when date is in past
 - Futures support: Symbols starting with '/' return None immediately (no earnings)
-- Timeout enforcement: 5-second timeout on Yahoo Finance requests (Unix-like systems)
+- Timeout handling: Relies on yfinance's internal request timeout (no signal-based timeout)
 
 **Data source fallback chain:**
 1. Cache (instant, <5ms)
@@ -20,8 +20,8 @@ dramatically speed up earnings pre-filtering in the FF calendar spread scanner.
 4. Graceful degradation (returns None, logs warning)
 
 **Performance targets:**
-- Batch processing: 100 symbols in <10s (cold start), <1s (warm cache)
-- Single lookup: <5ms (cache hit), ~100-200ms (Yahoo), ~200-500ms (TastyTrade fallback)
+- Batch processing: 100 symbols in <15s (cold start), <1s (warm cache)
+- Single lookup: <5ms (cache hit), ~100-500ms (Yahoo), ~200-500ms (TastyTrade fallback)
 
 **Usage:**
 
@@ -82,12 +82,12 @@ dramatically speed up earnings pre-filtering in the FF calendar spread scanner.
 Author: Claude Code
 Created: 2025-10-19
 Updated: 2025-10-20 - Added TastyTrade fallback support (Issue #17)
+         2025-10-20 - Removed signal-based timeout (curl_cffi incompatibility fix)
 """
 
 import sqlite3
 import logging
 import sys
-import signal
 from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Optional
@@ -105,16 +105,6 @@ logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
 logger = logging.getLogger(__name__)
-
-
-class TimeoutError(Exception):
-    """Exception raised when an operation times out."""
-    pass
-
-
-def timeout_handler(signum, frame):
-    """Signal handler for timeout."""
-    raise TimeoutError("Operation timed out")
 
 
 class EarningsCache:
@@ -218,9 +208,11 @@ class EarningsCache:
             }
 
         Cache freshness rules:
-            - If next_earnings_date is None: Always considered fresh (use cached None)
-            - If next_earnings_date is in past: Stale (return None to trigger re-fetch)
-            - If next_earnings_date is in future: Fresh (return cached value)
+            - If next_earnings_date is None: Always fresh (no scheduled earnings)
+            - If next_earnings_date is in future: Always fresh (upcoming earnings)
+            - If next_earnings_date is in past: Fresh for 30 days after the date
+              (company likely hasn't announced next earnings yet)
+            - If next_earnings_date is >30 days old: Stale (might have new date)
         """
         cursor = self.conn.execute(
             "SELECT next_earnings_date, last_updated, data_source FROM earnings WHERE symbol = ?",
@@ -237,11 +229,17 @@ class EarningsCache:
         if earnings_date_str is not None:
             earnings_date = date.fromisoformat(earnings_date_str)
             if earnings_date < date.today():
-                # Cached date is in past → stale, trigger re-fetch
-                logger.debug(f"{symbol}: Cached date {earnings_date_str} is stale")
-                return None
+                # Past date - check if it's too old
+                days_since_earnings = (date.today() - earnings_date).days
+                if days_since_earnings > 30:
+                    # Stale: >30 days old, company may have announced next earnings
+                    logger.debug(f"{symbol}: Cached date {earnings_date_str} is {days_since_earnings} days old (stale)")
+                    return None
+                else:
+                    # Fresh: Recently past, company probably hasn't announced next date yet
+                    logger.debug(f"{symbol}: Cached date {earnings_date_str} is {days_since_earnings} days old (fresh)")
 
-        # Cache is fresh (date in future or None)
+        # Cache is fresh
         return {
             "symbol": symbol,
             "next_earnings": earnings_date_str,
@@ -306,7 +304,8 @@ class EarningsCache:
         Args:
             symbol: Stock ticker symbol (e.g., "AAPL")
             timeout: Max seconds to wait for API response (default: 5.0)
-                    Uses signal.alarm() on Unix-like systems for timeout enforcement.
+                    NOTE: Timeout is not enforced due to incompatibility with curl_cffi.
+                    Left as parameter for potential future implementations.
 
         Returns:
             Next upcoming earnings date, or None if not available
@@ -328,18 +327,16 @@ class EarningsCache:
             logger.debug(f"{symbol}: Futures symbol, skipping Yahoo Finance")
             return None
 
-        # Set up timeout handler (Unix-like systems only)
-        old_handler = None
-        timeout_supported = hasattr(signal, 'SIGALRM')
+        # NOTE: Signal-based timeout disabled due to incompatibility with curl_cffi
+        # (yfinance uses curl_cffi which can't handle signal interrupts in C callbacks)
+        # Timeout is instead handled by yfinance's own request timeout mechanism
 
         try:
-            if timeout_supported:
-                # Set up alarm signal for timeout
-                old_handler = signal.signal(signal.SIGALRM, timeout_handler)
-                signal.alarm(int(timeout))
 
             logger.debug(f"{symbol}: Fetching from Yahoo Finance...")
             ticker = yf.Ticker(symbol)
+
+            most_recent_date = None  # Track most recent date (past or future)
 
             # Method 1: Try ticker.calendar first (fastest)
             try:
@@ -349,7 +346,7 @@ class EarningsCache:
 
                     # Handle pandas Timestamp or list of Timestamps
                     if hasattr(earnings_raw, '__iter__') and not isinstance(earnings_raw, str):
-                        # List of dates (take first upcoming)
+                        # List of dates
                         for dt in earnings_raw:
                             if hasattr(dt, 'date'):
                                 earnings_date = dt.date()
@@ -357,8 +354,12 @@ class EarningsCache:
                                 earnings_date = date.fromisoformat(str(dt).split()[0])
 
                             if earnings_date >= date.today():
-                                logger.info(f"{symbol}: Found earnings {earnings_date} (calendar)")
+                                # Found future date, return immediately
+                                logger.info(f"{symbol}: Found upcoming earnings {earnings_date} (calendar)")
                                 return earnings_date
+                            elif most_recent_date is None or earnings_date > most_recent_date:
+                                # Track most recent past date
+                                most_recent_date = earnings_date
                     else:
                         # Single date
                         if hasattr(earnings_raw, 'date'):
@@ -367,8 +368,10 @@ class EarningsCache:
                             earnings_date = date.fromisoformat(str(earnings_raw).split()[0])
 
                         if earnings_date >= date.today():
-                            logger.info(f"{symbol}: Found earnings {earnings_date} (calendar)")
+                            logger.info(f"{symbol}: Found upcoming earnings {earnings_date} (calendar)")
                             return earnings_date
+                        else:
+                            most_recent_date = earnings_date
             except Exception as e:
                 logger.debug(f"{symbol}: ticker.calendar failed: {e}")
 
@@ -376,7 +379,7 @@ class EarningsCache:
             try:
                 earnings_dates = ticker.get_earnings_dates(limit=10)
                 if earnings_dates is not None and len(earnings_dates) > 0:
-                    # Find first future date
+                    # Find first future date, or track most recent past date
                     for idx in earnings_dates.index:
                         if hasattr(idx, 'date'):
                             earnings_date = idx.date()
@@ -384,27 +387,26 @@ class EarningsCache:
                             earnings_date = date.fromisoformat(str(idx).split()[0])
 
                         if earnings_date >= date.today():
-                            logger.info(f"{symbol}: Found earnings {earnings_date} (earnings_dates)")
+                            logger.info(f"{symbol}: Found upcoming earnings {earnings_date} (earnings_dates)")
                             return earnings_date
+                        elif most_recent_date is None or earnings_date > most_recent_date:
+                            most_recent_date = earnings_date
             except Exception as e:
                 logger.debug(f"{symbol}: get_earnings_dates() failed: {e}")
 
-            # No earnings date found
-            logger.info(f"{symbol}: No upcoming earnings date available")
+            # If we found a past date, return it
+            if most_recent_date is not None:
+                logger.info(f"{symbol}: Most recent earnings {most_recent_date} (past), no upcoming date scheduled")
+                return most_recent_date
+
+            # No earnings date found at all
+            logger.info(f"{symbol}: No earnings data available")
             return None
 
-        except TimeoutError:
-            logger.warning(f"{symbol}: Yahoo Finance timeout after {timeout}s")
-            return None
         except Exception as e:
+            # Catch any errors from yfinance (network errors, timeouts, etc.)
             logger.warning(f"{symbol}: Yahoo Finance fetch failed: {e}")
             return None
-        finally:
-            # Cancel alarm and restore old handler
-            if timeout_supported:
-                signal.alarm(0)  # Cancel alarm
-                if old_handler is not None:
-                    signal.signal(signal.SIGALRM, old_handler)
 
     def _fetch_from_tastytrade(self, symbol: str) -> Optional[date]:
         """
@@ -472,14 +474,13 @@ class EarningsCache:
 
             earnings_date = earnings_info.expected_report_date
 
-            # Validate it's a future date
+            # Validate and return the date (past or future)
             if isinstance(earnings_date, date):
                 if earnings_date >= date.today():
-                    logger.info(f"{symbol}: Found earnings {earnings_date} (tastytrade)")
-                    return earnings_date
+                    logger.info(f"{symbol}: Found upcoming earnings {earnings_date} (tastytrade)")
                 else:
-                    logger.info(f"{symbol}: TastyTrade date {earnings_date} is in past")
-                    return None
+                    logger.info(f"{symbol}: Most recent earnings {earnings_date} (past, tastytrade)")
+                return earnings_date
             else:
                 logger.warning(f"{symbol}: TastyTrade returned non-date object: {type(earnings_date)}")
                 return None
@@ -560,33 +561,52 @@ class EarningsCache:
 
         # 2. Try Yahoo Finance
         logger.debug(f"{symbol}: Cache miss, fetching from Yahoo Finance")
+        yahoo_date = None
+        yahoo_success = False
         try:
-            earnings_date = self._fetch_from_yahoo(symbol)
-            if earnings_date is not None:
-                # Yahoo succeeded, cache and return
-                self._save_to_cache(symbol, earnings_date, "yahoo")
+            yahoo_date = self._fetch_from_yahoo(symbol)
+            yahoo_success = True
+            if yahoo_date is not None:
+                # Yahoo succeeded (returned past or future date), cache and return
+                self._save_to_cache(symbol, yahoo_date, "yahoo")
                 timestamp = datetime.now(timezone.utc).isoformat()
+
+                # Informational message about what we found
+                if yahoo_date >= date.today():
+                    print(f"[INFO] {symbol}: Upcoming earnings {yahoo_date}", file=sys.stderr)
+                else:
+                    days_ago = (date.today() - yahoo_date).days
+                    print(f"[INFO] {symbol}: Most recent earnings {yahoo_date} ({days_ago} days ago), no upcoming date scheduled", file=sys.stderr)
+
                 return {
                     "symbol": symbol,
-                    "next_earnings": earnings_date.isoformat(),
+                    "next_earnings": yahoo_date.isoformat(),
                     "source": "yahoo",
                     "cached_at": timestamp
                 }
             else:
-                # Yahoo returned None (no data), try TastyTrade
-                print(f"[WARN] {symbol}: Yahoo Finance returned no data, trying TastyTrade fallback...", file=sys.stderr)
+                # Yahoo returned None (no data available at all), try TastyTrade
+                logger.debug(f"{symbol}: Yahoo Finance returned no data, trying TastyTrade fallback")
         except Exception as e:
             # Yahoo raised exception, try TastyTrade
-            print(f"[WARN] {symbol}: Yahoo Finance failed ({e}), trying TastyTrade fallback...", file=sys.stderr)
+            logger.warning(f"{symbol}: Yahoo Finance failed ({e}), trying TastyTrade fallback")
 
-        # 3. Try TastyTrade fallback (if session provided)
-        if self.session:
+        # 3. Try TastyTrade fallback (if session provided and Yahoo truly had no data)
+        if self.session and yahoo_date is None:
             try:
                 tt_date = self._fetch_from_tastytrade(symbol)
                 if tt_date is not None:
                     # TastyTrade succeeded, cache and return
                     self._save_to_cache(symbol, tt_date, "tastytrade")
                     timestamp = datetime.now(timezone.utc).isoformat()
+
+                    # Informational message
+                    if tt_date >= date.today():
+                        print(f"[INFO] {symbol}: Upcoming earnings {tt_date} (from TastyTrade)", file=sys.stderr)
+                    else:
+                        days_ago = (date.today() - tt_date).days
+                        print(f"[INFO] {symbol}: Most recent earnings {tt_date} ({days_ago} days ago, from TastyTrade)", file=sys.stderr)
+
                     return {
                         "symbol": symbol,
                         "next_earnings": tt_date.isoformat(),
@@ -594,14 +614,14 @@ class EarningsCache:
                         "cached_at": timestamp
                     }
                 else:
-                    print(f"[WARN] {symbol}: TastyTrade returned no data", file=sys.stderr)
+                    logger.debug(f"{symbol}: TastyTrade returned no data")
             except Exception as e:
-                print(f"[WARN] {symbol}: TastyTrade fallback failed ({e})", file=sys.stderr)
+                logger.debug(f"{symbol}: TastyTrade fallback failed ({e})")
         else:
-            logger.debug(f"{symbol}: TastyTrade session not available, skipping fallback")
+            logger.debug(f"{symbol}: TastyTrade session not available or not needed, skipping fallback")
 
         # 4. Graceful degradation - all sources failed or returned None
-        print(f"[WARN] {symbol}: No earnings data available from any source (allowing through)", file=sys.stderr)
+        print(f"[INFO] {symbol}: No earnings data available from any source (no earnings to avoid)", file=sys.stderr)
 
         # Cache the None result to avoid repeated API calls
         self._save_to_cache(symbol, None, "none")

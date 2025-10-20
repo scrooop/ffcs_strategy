@@ -14,6 +14,7 @@
 #
 # Usage examples:
 #   python ff_tastytrade_scanner.py --tickers SPY QQQ --pairs 30-60 30-90 60-90 --min-ff 0.20
+#   python ff_tastytrade_scanner.py --tickers SPY --pairs 30-60 --min-ff 0.20 --debug  # Enable debug logging
 #
 # Notes:
 #   * Greeks.volatility from dxFeed is Black-Scholes IV per contract.
@@ -28,6 +29,7 @@ import math
 import json
 import asyncio
 import argparse
+import logging
 import time
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, UTC
@@ -1301,9 +1303,31 @@ Examples:
     ap.add_argument("--delta-tolerance", type=float, default=0.05,
                     help="Max delta deviation for double calendars (default: 0.05 = ±5Δ). Range: 0.01-0.10.")
 
+    # Debug/logging options
+    ap.add_argument("--debug", action="store_true",
+                    help="Enable debug logging from tastytrade SDK and httpx library.")
+
     args = ap.parse_args()
     tickers = read_list_arg(args.tickers)
     pairs = parse_pairs(read_list_arg(args.pairs))
+
+    # Configure logging based on --debug flag
+    if args.debug:
+        # Debug mode: Show all DEBUG messages from all libraries
+        logging.basicConfig(
+            level=logging.DEBUG,
+            format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+        )
+    else:
+        # Normal mode: Silence third-party library debug/info logging
+        logging.basicConfig(
+            level=logging.WARNING,
+            format='%(message)s'
+        )
+        # Explicitly silence noisy libraries
+        logging.getLogger('tastytrade').setLevel(logging.WARNING)
+        logging.getLogger('httpx').setLevel(logging.WARNING)
+        logging.getLogger('earnings_cache').setLevel(logging.WARNING)
 
     # Validate flag values
     if args.min_liquidity_rating < 0 or args.min_liquidity_rating > 5:
@@ -1378,9 +1402,15 @@ Examples:
 
         # Only process passing symbols
         tickers = passing_symbols
+
+        # Early exit if all symbols filtered
+        if not tickers:
+            print("No symbols passed earnings filter. Use --allow-earnings to scan through earnings.", file=sys.stderr)
+            sys.exit(0)
     else:
-        # If --allow-earnings is set, create dummy earnings_data with "skipped" source
-        # This ensures earnings_source column shows "skipped" for all symbols
+        # If --allow-earnings is set, mark all symbols as having earnings filter bypassed
+        # Real earnings dates will still be fetched from market_metrics API inside scan()
+        # This just sets the earnings_source column to "skipped" for CSV tracking
         earnings_data = {symbol: {'source': 'skipped', 'next_earnings': None} for symbol in tickers}
 
     # Run scan

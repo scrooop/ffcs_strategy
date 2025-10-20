@@ -28,8 +28,9 @@ import math
 import json
 import asyncio
 import argparse
+import time
 from dataclasses import dataclass
-from datetime import date, datetime, UTC
+from datetime import date, datetime, timedelta, UTC
 from typing import Dict, List, Tuple, Optional
 
 from tastytrade import Session, DXLinkStreamer
@@ -41,6 +42,8 @@ from tastytrade.dxfeed import Greeks, Quote
 from tastytrade.utils import today_in_new_york
 
 import yfinance as yf
+
+from earnings_cache import EarningsCache
 
 # ---------- Helpers ----------
 
@@ -1320,6 +1323,54 @@ Examples:
 
     # Create session
     session = Session(username, password=password, is_test=bool(args.sandbox))
+
+    # Early earnings pre-filter (NEW: Issue #16)
+    # Filter symbols by earnings conflicts BEFORE any TastyTrade API calls
+    if args.skip_earnings:
+        start_time = time.time()
+
+        # Initialize cache
+        cache = EarningsCache()
+
+        # Batch fetch earnings for all symbols
+        earnings_data = cache.batch_get_earnings(tickers)
+
+        # Count cache hits/misses
+        cache_hits = sum(1 for d in earnings_data.values() if d['source'] == 'cache')
+        fresh_fetches = len(earnings_data) - cache_hits
+
+        # Filter symbols using existing check_earnings_conflict() logic
+        passing_symbols = []
+        filtered_symbols = []
+
+        # Determine back expiry from DTE pairs (use max back DTE for conservative filtering)
+        back_dte = max(pair[1] for pair in pairs)
+        back_expiry = ny_today() + timedelta(days=back_dte)
+
+        for symbol in tickers:
+            # Check earnings conflict
+            next_earnings = earnings_data[symbol]["next_earnings"]
+            if next_earnings:
+                earnings_date = date.fromisoformat(next_earnings)
+                if ny_today() <= earnings_date <= back_expiry:
+                    reason = f"Earnings on {next_earnings} conflicts with back expiry {back_expiry}"
+                    filtered_symbols.append((symbol, reason))
+                    continue
+
+            passing_symbols.append(symbol)
+
+        # Log results
+        elapsed = time.time() - start_time
+        print(f"Earnings pre-filter: {len(tickers)} → {len(passing_symbols)} passed ({len(filtered_symbols)} filtered)")
+        print(f"  Cache hits: {cache_hits} | Fresh fetches: {fresh_fetches}")
+        print(f"  Earnings check completed in {elapsed:.1f}s")
+
+        if args.show_earnings_conflicts:
+            for symbol, reason in filtered_symbols:
+                print(f"  {symbol}: {reason}")
+
+        # Only process passing symbols
+        tickers = passing_symbols
 
     # Run scan
     # Both --skip-earnings and --allow-earnings set skip_earnings via mutually exclusive group

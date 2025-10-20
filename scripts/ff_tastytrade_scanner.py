@@ -1532,6 +1532,13 @@ def read_list_arg(values: List[str]) -> List[str]:
     return [x.strip().upper() for x in out if x.strip()]
 
 def main():
+    # Workaround for Python 3.14 asyncio task cancellation recursion bug
+    # When DXLinkStreamer connections timeout, pending _connect() tasks accumulate
+    # and can trigger RecursionError during asyncio cleanup. Increasing the limit
+    # gives asyncio enough stack depth to handle the cancellation chains.
+    # See: https://github.com/python/cpython/issues/126211
+    sys.setrecursionlimit(10000)
+
     ap = argparse.ArgumentParser(
         description="Forward-IV (FF) calendar spread scanner using tastytrade API + dxFeed Greeks.",
         epilog="""

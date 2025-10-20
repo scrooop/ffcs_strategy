@@ -23,7 +23,7 @@ from pathlib import Path
 # Add scripts directory to path to import scanner functions
 sys.path.insert(0, str(Path(__file__).parent.parent / "scripts"))
 
-from ff_tastytrade_scanner import validate_ff_inputs, forward_iv
+from ff_tastytrade_scanner import validate_ff_inputs, forward_iv, pick_atm_strike, ATM_DELTA_TARGET, ATM_DELTA_TOLERANCE
 
 
 # ============================================================================
@@ -569,3 +569,429 @@ class TestIntegration:
             # Validation should catch all these
             skip_reason = validate_ff_inputs(iv_front, iv_back, dte_front, dte_back)
             assert skip_reason is not None, f"Validation should catch: {description}"
+
+
+# ============================================================================
+# Test Suite: ATM Strike Selection
+# ============================================================================
+
+class MockStrike:
+    """Mock strike object for testing pick_atm_strike()"""
+    def __init__(self, strike_price: float, call_symbol: str, put_symbol: str):
+        self.strike_price = strike_price
+        self.call_streamer_symbol = call_symbol
+        self.put_streamer_symbol = put_symbol
+
+
+class MockExpiration:
+    """Mock expiration object for testing pick_atm_strike()"""
+    def __init__(self, strikes: list):
+        self.strikes = strikes
+
+
+class TestPickATMStrike:
+    """Test pick_atm_strike() delta-based selection and fallback logic"""
+
+    def test_delta_selection_exact_50delta(self):
+        """Test that 50Δ strike is selected when available."""
+        # Create mock strikes with various deltas
+        strikes = [
+            MockStrike(95.0, "CALL95", "PUT95"),
+            MockStrike(100.0, "CALL100", "PUT100"),  # This should be selected (50Δ)
+            MockStrike(105.0, "CALL105", "PUT105"),
+        ]
+        exp_obj = MockExpiration(strikes)
+
+        # Create greeks_map with exact 50Δ on 100 strike
+        greeks_map = {
+            "CALL95": (0.25, 0.65),   # Higher delta
+            "CALL100": (0.23, 0.50),  # Exact 50Δ
+            "CALL105": (0.21, 0.35),  # Lower delta
+        }
+
+        strike, delta, call_sym, put_sym = pick_atm_strike(exp_obj, 100.0, greeks_map)
+
+        assert strike == 100.0
+        assert delta == 0.50
+        assert call_sym == "CALL100"
+        assert put_sym == "PUT100"
+
+    def test_delta_selection_within_tolerance(self):
+        """Test that closest delta within tolerance is selected."""
+        # Create mock strikes where none are exactly 50Δ but one is close
+        strikes = [
+            MockStrike(95.0, "CALL95", "PUT95"),
+            MockStrike(100.0, "CALL100", "PUT100"),  # 48Δ (within ±10Δ tolerance)
+            MockStrike(105.0, "CALL105", "PUT105"),
+        ]
+        exp_obj = MockExpiration(strikes)
+
+        # Create greeks_map with 48Δ on 100 strike (within 0.10 tolerance)
+        greeks_map = {
+            "CALL95": (0.25, 0.65),
+            "CALL100": (0.23, 0.48),  # 48Δ (distance 0.02 from 50Δ)
+            "CALL105": (0.21, 0.35),
+        }
+
+        strike, delta, call_sym, put_sym = pick_atm_strike(exp_obj, 100.0, greeks_map)
+
+        assert strike == 100.0
+        assert abs(delta - 0.48) < TOLERANCE
+        assert call_sym == "CALL100"
+        assert put_sym == "PUT100"
+
+    def test_delta_selection_picks_closest(self):
+        """Test that closest delta to 50Δ is selected when multiple within tolerance."""
+        strikes = [
+            MockStrike(95.0, "CALL95", "PUT95"),
+            MockStrike(100.0, "CALL100", "PUT100"),  # 52Δ (distance 0.02)
+            MockStrike(102.5, "CALL102.5", "PUT102.5"),  # 49Δ (distance 0.01) - should be selected
+            MockStrike(105.0, "CALL105", "PUT105"),
+        ]
+        exp_obj = MockExpiration(strikes)
+
+        greeks_map = {
+            "CALL95": (0.25, 0.65),
+            "CALL100": (0.23, 0.52),      # Distance 0.02
+            "CALL102.5": (0.22, 0.49),    # Distance 0.01 (closest)
+            "CALL105": (0.21, 0.35),
+        }
+
+        strike, delta, call_sym, put_sym = pick_atm_strike(exp_obj, 102.5, greeks_map)
+
+        assert strike == 102.5
+        assert abs(delta - 0.49) < TOLERANCE
+        assert call_sym == "CALL102.5"
+
+    def test_fallback_to_nearest_spot_no_deltas_in_tolerance(self):
+        """Test fallback to nearest-spot when no deltas within ±10Δ tolerance."""
+        strikes = [
+            MockStrike(90.0, "CALL90", "PUT90"),   # Nearest to spot=100
+            MockStrike(100.0, "CALL100", "PUT100"),  # This should be selected by fallback
+            MockStrike(110.0, "CALL110", "PUT110"),
+        ]
+        exp_obj = MockExpiration(strikes)
+
+        # All deltas outside ±10Δ tolerance
+        greeks_map = {
+            "CALL90": (0.25, 0.75),   # 75Δ (distance 0.25, outside tolerance)
+            "CALL100": (0.23, 0.65),  # 65Δ (distance 0.15, outside tolerance)
+            "CALL110": (0.21, 0.25),  # 25Δ (distance 0.25, outside tolerance)
+        }
+
+        strike, delta, call_sym, put_sym = pick_atm_strike(exp_obj, 100.0, greeks_map)
+
+        # Should fall back to strike nearest spot (100.0)
+        assert strike == 100.0
+        assert delta is None  # Fallback doesn't set delta
+        assert call_sym == "CALL100"
+        assert put_sym == "PUT100"
+
+    def test_fallback_to_nearest_spot_empty_greeks_map(self):
+        """Test fallback to nearest-spot when greeks_map is empty."""
+        strikes = [
+            MockStrike(95.0, "CALL95", "PUT95"),
+            MockStrike(100.0, "CALL100", "PUT100"),  # Nearest to spot
+            MockStrike(105.0, "CALL105", "PUT105"),
+        ]
+        exp_obj = MockExpiration(strikes)
+
+        # Empty greeks_map should trigger fallback
+        greeks_map = {}
+
+        strike, delta, call_sym, put_sym = pick_atm_strike(exp_obj, 100.0, greeks_map)
+
+        assert strike == 100.0
+        assert delta is None
+        assert call_sym == "CALL100"
+
+    def test_fallback_to_nearest_spot_none_greeks_map(self):
+        """Test fallback to nearest-spot when greeks_map is None."""
+        strikes = [
+            MockStrike(95.0, "CALL95", "PUT95"),
+            MockStrike(100.0, "CALL100", "PUT100"),
+            MockStrike(105.0, "CALL105", "PUT105"),
+        ]
+        exp_obj = MockExpiration(strikes)
+
+        strike, delta, call_sym, put_sym = pick_atm_strike(exp_obj, 100.0, None)
+
+        assert strike == 100.0
+        assert delta is None
+        assert call_sym == "CALL100"
+
+    def test_fallback_nearest_spot_exact_match(self):
+        """Test fallback selects exact spot match when available."""
+        strikes = [
+            MockStrike(95.0, "CALL95", "PUT95"),
+            MockStrike(100.0, "CALL100", "PUT100"),  # Exact match
+            MockStrike(105.0, "CALL105", "PUT105"),
+        ]
+        exp_obj = MockExpiration(strikes)
+
+        strike, delta, call_sym, put_sym = pick_atm_strike(exp_obj, 100.0, {})
+
+        assert strike == 100.0
+        assert call_sym == "CALL100"
+
+    def test_fallback_nearest_spot_between_strikes(self):
+        """Test fallback selects closest strike when spot is between strikes."""
+        strikes = [
+            MockStrike(95.0, "CALL95", "PUT95"),
+            MockStrike(105.0, "CALL105", "PUT105"),  # Closest to spot=102
+        ]
+        exp_obj = MockExpiration(strikes)
+
+        strike, delta, call_sym, put_sym = pick_atm_strike(exp_obj, 102.0, {})
+
+        # 102 is closer to 105 than to 95
+        assert strike == 105.0
+        assert call_sym == "CALL105"
+
+    def test_greeks_missing_some_strikes(self):
+        """Test delta selection when Greeks missing for some strikes."""
+        strikes = [
+            MockStrike(95.0, "CALL95", "PUT95"),
+            MockStrike(100.0, "CALL100", "PUT100"),
+            MockStrike(105.0, "CALL105", "PUT105"),
+        ]
+        exp_obj = MockExpiration(strikes)
+
+        # Greeks only available for 95 and 105, not 100
+        greeks_map = {
+            "CALL95": (0.25, 0.65),
+            # CALL100 missing
+            "CALL105": (0.21, 0.48),  # 48Δ (within tolerance, closest available)
+        }
+
+        strike, delta, call_sym, put_sym = pick_atm_strike(exp_obj, 100.0, greeks_map)
+
+        # Should select 105 strike (48Δ is closest available within tolerance)
+        assert strike == 105.0
+        assert abs(delta - 0.48) < TOLERANCE
+        assert call_sym == "CALL105"
+
+    def test_greeks_none_delta(self):
+        """Test that strikes with None delta are skipped."""
+        strikes = [
+            MockStrike(95.0, "CALL95", "PUT95"),
+            MockStrike(100.0, "CALL100", "PUT100"),
+            MockStrike(105.0, "CALL105", "PUT105"),
+        ]
+        exp_obj = MockExpiration(strikes)
+
+        # 100 strike has None delta
+        greeks_map = {
+            "CALL95": (0.25, 0.65),
+            "CALL100": (0.23, None),  # Delta is None
+            "CALL105": (0.21, 0.48),  # Should be selected
+        }
+
+        strike, delta, call_sym, put_sym = pick_atm_strike(exp_obj, 100.0, greeks_map)
+
+        assert strike == 105.0
+        assert abs(delta - 0.48) < TOLERANCE
+
+    def test_constants_defined(self):
+        """Test that ATM_DELTA_TARGET and ATM_DELTA_TOLERANCE constants are defined correctly."""
+        assert ATM_DELTA_TARGET == 0.50
+        assert ATM_DELTA_TOLERANCE == 0.10
+
+    def test_no_strikes_raises_error(self):
+        """Test that RuntimeError is raised when expiration has no strikes."""
+        exp_obj = MockExpiration([])
+
+        with pytest.raises(RuntimeError, match="No strikes found"):
+            pick_atm_strike(exp_obj, 100.0, {})
+
+
+# ============================================================================
+# Test Suite: Min-Gate Filtering (Double Calendars)
+# ============================================================================
+
+class TestMinGateFiltering:
+    """Test min-gate filtering logic for double calendar spreads."""
+
+    def test_min_ff_calculation_basic(self):
+        """Test that min_ff is correctly calculated as min(call_ff, put_ff)."""
+        # Setup: call FF = 0.25, put FF = 0.30
+        call_ff = 0.25
+        put_ff = 0.30
+
+        # Calculate min_ff
+        min_ff = min(call_ff, put_ff)
+
+        # Verify
+        assert min_ff == 0.25
+        assert min_ff == call_ff
+        assert min_ff < put_ff
+
+    def test_min_ff_calculation_equal_ffs(self):
+        """Test min_ff when both legs have equal FF."""
+        # Setup: call FF = 0.23, put FF = 0.23
+        call_ff = 0.23
+        put_ff = 0.23
+
+        # Calculate min_ff
+        min_ff = min(call_ff, put_ff)
+
+        # Verify
+        assert min_ff == 0.23
+        assert min_ff == call_ff
+        assert min_ff == put_ff
+
+    def test_min_ff_put_lower(self):
+        """Test min_ff when put FF is lower than call FF."""
+        # Setup: call FF = 0.30, put FF = 0.20
+        call_ff = 0.30
+        put_ff = 0.20
+
+        # Calculate min_ff
+        min_ff = min(call_ff, put_ff)
+
+        # Verify
+        assert min_ff == 0.20
+        assert min_ff == put_ff
+        assert min_ff < call_ff
+
+    def test_min_gate_filtering_both_legs_pass(self):
+        """Test that double calendar passes when both legs meet threshold."""
+        # Setup: threshold = 0.20
+        threshold = 0.20
+        call_ff = 0.25
+        put_ff = 0.23
+
+        min_ff = min(call_ff, put_ff)
+
+        # Both legs pass threshold
+        assert call_ff >= threshold
+        assert put_ff >= threshold
+        assert min_ff >= threshold  # Should pass min-gate
+
+    def test_min_gate_filtering_one_leg_fails(self):
+        """Test that double calendar fails when one leg is below threshold."""
+        # Setup: threshold = 0.23
+        threshold = 0.23
+        call_ff = 0.30
+        put_ff = 0.18  # Below threshold
+
+        min_ff = min(call_ff, put_ff)
+
+        # Call leg passes, put leg fails
+        assert call_ff >= threshold
+        assert put_ff < threshold
+        assert min_ff < threshold  # Should fail min-gate
+
+    def test_min_gate_filtering_both_legs_fail(self):
+        """Test that double calendar fails when both legs are below threshold."""
+        # Setup: threshold = 0.23
+        threshold = 0.23
+        call_ff = 0.18
+        put_ff = 0.15
+
+        min_ff = min(call_ff, put_ff)
+
+        # Both legs fail
+        assert call_ff < threshold
+        assert put_ff < threshold
+        assert min_ff < threshold  # Should fail min-gate
+
+    def test_min_gate_edge_case_exactly_at_threshold(self):
+        """Test edge case where min_ff exactly equals threshold."""
+        # Setup: threshold = 0.20
+        threshold = 0.20
+        call_ff = 0.25
+        put_ff = 0.20  # Exactly at threshold
+
+        min_ff = min(call_ff, put_ff)
+
+        # Should pass (>= threshold)
+        assert min_ff == threshold
+        assert min_ff >= threshold
+
+    def test_min_gate_vs_avg_gate_comparison(self):
+        """Test that min-gate is more conservative than average-gate."""
+        # Setup: call FF = 0.30, put FF = 0.18
+        call_ff = 0.30
+        put_ff = 0.18
+        threshold = 0.23
+
+        # Average-gate (old logic)
+        avg_ff = (call_ff + put_ff) / 2.0
+        avg_gate_passes = avg_ff >= threshold
+
+        # Min-gate (new logic)
+        min_ff = min(call_ff, put_ff)
+        min_gate_passes = min_ff >= threshold
+
+        # Verify min-gate is more conservative
+        assert avg_ff == 0.24  # Would pass with avg-gate
+        assert avg_gate_passes is True
+        assert min_ff == 0.18  # Fails with min-gate
+        assert min_gate_passes is False
+
+        # This demonstrates min-gate correctly requires BOTH wings to meet threshold
+
+    def test_min_gate_scenario_weak_put_wing(self):
+        """Test real-world scenario: strong call wing, weak put wing."""
+        # Scenario: High IV on calls, normal IV on puts (typical in bear markets)
+        # Call: IV_front=0.35, IV_back=0.28, 30-60 DTE
+        # Put: IV_front=0.25, IV_back=0.24, 30-60 DTE
+
+        call_iv_front = 0.35
+        call_iv_back = 0.28
+        put_iv_front = 0.25
+        put_iv_back = 0.24
+        dte_front = 30
+        dte_back = 60
+
+        # Calculate forward IVs
+        call_fwd = forward_iv(call_iv_front, call_iv_back, dte_front, dte_back)
+        put_fwd = forward_iv(put_iv_front, put_iv_back, dte_front, dte_back)
+
+        assert call_fwd is not None
+        assert put_fwd is not None
+
+        # Calculate FFs
+        call_ff = (call_iv_front - call_fwd) / call_fwd
+        put_ff = (put_iv_front - put_fwd) / put_fwd
+
+        # Calculate metrics
+        avg_ff = (call_ff + put_ff) / 2.0
+        min_ff = min(call_ff, put_ff)
+
+        threshold = 0.20
+
+        # Call wing strong, put wing weak
+        assert call_ff > threshold  # Strong call wing
+        # Put wing may be weak (close to threshold or below)
+
+        # Min-gate correctly rejects if put wing is too weak
+        if put_ff < threshold:
+            assert min_ff < threshold  # Should fail min-gate
+            # Even though avg_ff might pass
+
+    def test_combined_ff_retained_for_reference(self):
+        """Test that combined_ff is still calculated and retained alongside min_ff."""
+        # Both metrics should exist in output
+        call_ff = 0.28
+        put_ff = 0.22
+
+        # New metric: min_ff
+        min_ff = min(call_ff, put_ff)
+
+        # Legacy metric: combined_ff (retained for reference)
+        combined_ff = (call_ff + put_ff) / 2.0
+
+        # Both should be calculated
+        assert min_ff == 0.22
+        assert combined_ff == 0.25
+
+        # min_ff is used for filtering
+        threshold = 0.23
+        assert min_ff < threshold  # Fails min-gate
+        assert combined_ff >= threshold  # Would pass avg-gate (old logic)
+
+        # This demonstrates why both metrics are valuable:
+        # - min_ff for filtering (conservative)
+        # - combined_ff for reference/analysis

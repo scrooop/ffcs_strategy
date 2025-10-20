@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-# ff_tastytrade_scanner.py
+# ff_tastytrade_scanner.py - v3.0 (CSV schema refactor)
 # A forward-volatility (FF) scanner that uses the official tastytrade API + dxFeed streamer.
 # It fetches ATM IV for two expirations (closest to target DTEs), computes forward IV,
 # and reports FF = (FrontATMIV - FwdIV) / FwdIV for each requested ticker.
@@ -1348,30 +1348,23 @@ async def scan(session: Session, tickers: List[str], pairs: List[Tuple[int, int]
                 if min_ff_double >= min_ff or show_all_scans:
                     passed += 1
                     rows.append({
-                        # Common (8)
+                        # Metadata (4)
                         "timestamp": timestamp,
                         "symbol": sym,
                         "structure": "double",
                         "spot_price": f"{spot:.2f}",
+                        # Expirations (4)
                         "front_dte": front_choice["dte"],
                         "back_dte": back_choice["dte"],
                         "front_expiry": front_choice["expiration"].isoformat(),
                         "back_expiry": back_choice["expiration"].isoformat(),
-                        # ATM-specific (8) - empty for double structure
-                        "atm_strike": "",
-                        "atm_delta": "",
-                        "atm_ff": "",
-                        "atm_iv_front": "",
-                        "atm_iv_back": "",
-                        "atm_fwd_iv": "",
-                        "atm_iv_source_front": "",
-                        "atm_iv_source_back": "",
-                        # Double-specific (8) - populated for double structure
-                        "call_strike": f"{front_call.strike:.2f}",
+                        # Strikes/Deltas (4) - UNIFIED: both populated for double structure
+                        "strike": f"{front_call.strike:.2f}",  # RENAMED from call_strike
                         "put_strike": f"{front_put.strike:.2f}",
-                        "call_delta": round(front_call.actual_delta, 4),
+                        "delta": round(front_call.actual_delta, 4),  # RENAMED from call_delta
                         "put_delta": round(front_put.actual_delta, 4),
-                        "call_ff": round(ff_call, 6),
+                        # FF Metrics (4) - all populated for double structure
+                        "ff": round(ff_call, 6),  # RENAMED from call_ff
                         "put_ff": round(ff_put, 6),
                         "min_ff": round(min_ff_double, 6),
                         "combined_ff": round(combined_ff, 6),
@@ -1382,18 +1375,17 @@ async def scan(session: Session, tickers: List[str], pairs: List[Tuple[int, int]
                         "put_front_iv": round(front_put_iv, 6),
                         "put_back_iv": round(back_put_iv, 6),
                         "put_fwd_iv": round(fwd_put, 6),
-                        # IV sources - double (4)
+                        # IV sources (4)
                         "iv_source_call_front": call_iv_source_front,
                         "iv_source_call_back": call_iv_source_back,
                         "iv_source_put_front": put_iv_source_front,
                         "iv_source_put_back": put_iv_source_back,
-                        # Quality filters (5)
+                        # Quality filters (6)
                         "earnings_conflict": "no" if not earnings_date else "",
                         "earnings_date": earnings_date.isoformat() if earnings_date else "",
                         "option_volume_today": f"{option_volume:.0f}" if option_volume is not None else "",
                         "liq_rating": str(liq_rating) if liq_rating is not None else "",
                         "earnings_source": earnings_source,
-                        # Tracking (1)
                         "skip_reason": ""
                     })
 
@@ -1548,32 +1540,25 @@ async def scan(session: Session, tickers: List[str], pairs: List[Tuple[int, int]
                 if atm_ff >= min_ff or show_all_scans:
                     passed += 1
                     rows.append({
-                        # Common (8)
+                        # Metadata (4)
                         "timestamp": timestamp,
                         "symbol": sym,
                         "structure": "atm-call",
                         "spot_price": f"{spot:.2f}",
+                        # Expirations (4)
                         "front_dte": front_choice.dte,
                         "back_dte": back_choice.dte,
                         "front_expiry": front_choice.expiration.isoformat(),
                         "back_expiry": back_choice.expiration.isoformat(),
-                        # ATM-specific (8) - populated for ATM structure
-                        "atm_strike": f"{front_choice.strike:.2f}",
-                        "atm_delta": round(front_choice.actual_delta, 4) if front_choice.actual_delta is not None else "",
-                        "atm_ff": round(atm_ff, 6),
-                        "atm_iv_front": round(atm_iv_front, 6),
-                        "atm_iv_back": round(atm_iv_back, 6),
-                        "atm_fwd_iv": round(atm_fwd_iv, 6),
-                        "atm_iv_source_front": atm_iv_src_front,
-                        "atm_iv_source_back": atm_iv_src_back,
-                        # Double-specific (8) - empty for ATM structure
-                        "call_strike": "",
+                        # Strikes/Deltas (4) - UNIFIED: populated for ATM, put_* empty
+                        "strike": f"{front_choice.strike:.2f}",
                         "put_strike": "",
-                        "call_delta": "",
+                        "delta": round(front_choice.actual_delta, 4) if front_choice.actual_delta is not None else "",
                         "put_delta": "",
-                        "call_ff": "",
+                        # FF Metrics (4) - ff and min_ff populated (same value), put_ff and combined_ff empty
+                        "ff": round(atm_ff, 6),
                         "put_ff": "",
-                        "min_ff": "",
+                        "min_ff": round(atm_ff, 6),  # Same as ff for ATM
                         "combined_ff": "",
                         # IV detail (6) - keep for transparency per CLAUDE.md
                         "call_front_iv": round(call_iv_f, 6),
@@ -1582,24 +1567,23 @@ async def scan(session: Session, tickers: List[str], pairs: List[Tuple[int, int]
                         "put_front_iv": round(put_iv_f, 6),
                         "put_back_iv": round(put_iv_b, 6),
                         "put_fwd_iv": "",
-                        # IV sources - double (4) - keep for reference
+                        # IV sources (4) - keep for reference
                         "iv_source_call_front": call_iv_src_front,
                         "iv_source_call_back": call_iv_src_back,
                         "iv_source_put_front": put_iv_src_front,
                         "iv_source_put_back": put_iv_src_back,
-                        # Quality filters (5)
+                        # Quality filters (6)
                         "earnings_conflict": "no" if not earnings_date else "",
                         "earnings_date": earnings_date.isoformat() if earnings_date else "",
                         "option_volume_today": f"{option_volume:.0f}" if option_volume is not None else "",
                         "liq_rating": str(liq_rating) if liq_rating is not None else "",
                         "earnings_source": earnings_source,
-                        # Tracking (1)
                         "skip_reason": ""
                     })
 
     # Sort results:
     # - Double calendars: sort by min_ff descending (primary), combined_ff (secondary), symbol (tertiary)
-    # - ATM calendars: sort by atm_ff descending (primary), symbol (secondary)
+    # - ATM calendars: sort by ff descending (primary), symbol (secondary)
     # Separate the two structures for appropriate sorting
     doubles = [r for r in rows if r["structure"] == "double"]
     atm_rows = [r for r in rows if r["structure"] == "atm-call"]
@@ -1607,8 +1591,8 @@ async def scan(session: Session, tickers: List[str], pairs: List[Tuple[int, int]
     # Sort doubles by min_ff (highest first), then combined_ff, then symbol
     doubles.sort(key=lambda r: (-r["min_ff"], -r["combined_ff"], r["symbol"]))
 
-    # Sort ATM by atm_ff (highest first), then symbol
-    atm_rows.sort(key=lambda r: (-r["atm_ff"], r["symbol"]))
+    # Sort ATM by ff (highest first), then symbol - v3.0: uses unified 'ff' column
+    atm_rows.sort(key=lambda r: (-r["ff"], r["symbol"]))
 
     # Combine back: doubles first (higher priority), then ATM
     rows = doubles + atm_rows
@@ -1840,33 +1824,31 @@ Examples:
         earnings_data=earnings_data
     ))
 
-    # v2.2 CSV schema (40 columns)
-    # Breaking changes from v2.1:
-    # - Added: atm_iv_source_front, atm_iv_source_back (ATM-specific IV source tracking)
-    # - Added: liq_rating (liquidity_rating 0-5 from Market Metrics)
-    # - Renamed: avg_options_volume_20d → option_volume_today (now using dxFeed Underlying.optionVolume)
-    # - Reordered: Logical grouping by structure (common, ATM, double, IV detail, sources, quality)
+    # v3.0 CSV schema (32 columns) - BREAKING CHANGE
+    # Breaking changes from v2.2:
+    # - REMOVED: 8 atm_* columns (atm_strike, atm_delta, atm_ff, atm_iv_front, atm_iv_back, atm_fwd_iv, atm_iv_source_front, atm_iv_source_back)
+    # - RENAMED: call_strike → strike, call_delta → delta, call_ff → ff
+    # - ATM rows: populate strike, delta, ff, min_ff (leave put_* empty)
+    # - Double rows: populate both strike+put_strike, delta+put_delta, ff+put_ff, min_ff+combined_ff
+    # - Unified namespace eliminates 16 empty columns per row (20% reduction: 40 → 32)
     cols = [
-        # Common (8)
+        # Metadata (4)
         "timestamp", "symbol", "structure", "spot_price",
+        # Expirations (4)
         "front_dte", "back_dte", "front_expiry", "back_expiry",
-        # ATM-specific (8)
-        "atm_strike", "atm_delta", "atm_ff",
-        "atm_iv_front", "atm_iv_back", "atm_fwd_iv",
-        "atm_iv_source_front", "atm_iv_source_back",
-        # Double-specific (8)
-        "call_strike", "put_strike", "call_delta", "put_delta",
-        "call_ff", "put_ff", "min_ff", "combined_ff",
+        # Strikes/Deltas (4) - UNIFIED NAMESPACE
+        "strike", "put_strike", "delta", "put_delta",
+        # FF Metrics (4)
+        "ff", "put_ff", "min_ff", "combined_ff",
         # IV detail (6)
         "call_front_iv", "call_back_iv", "call_fwd_iv",
         "put_front_iv", "put_back_iv", "put_fwd_iv",
-        # IV sources - double (4)
+        # IV sources (4)
         "iv_source_call_front", "iv_source_call_back",
         "iv_source_put_front", "iv_source_put_back",
-        # Quality filters (5)
+        # Quality filters (6)
         "earnings_conflict", "earnings_date",
         "option_volume_today", "liq_rating", "earnings_source",
-        # Tracking (1)
         "skip_reason"
     ]
 

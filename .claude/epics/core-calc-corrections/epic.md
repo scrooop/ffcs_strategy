@@ -2,7 +2,7 @@
 name: core-calc-corrections
 status: completed
 created: 2025-10-20T04:32:53Z
-updated: 2025-10-20T07:01:58Z
+updated: 2025-10-20T09:50:00Z
 progress: 100%
 prd: .claude/prds/core-calc-corrections.md
 github: https://github.com/scrooop/ffcs_strategy/issues/22

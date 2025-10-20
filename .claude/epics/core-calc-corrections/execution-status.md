@@ -1,8 +1,8 @@
 ---
 started: 2025-10-20T05:13:56Z
-completed: 2025-10-20T07:01:58Z
+completed: 2025-10-20T09:50:00Z
 branch: epic/core-calc-corrections
-updated: 2025-10-20T07:01:58Z
+updated: 2025-10-20T09:50:00Z
 status: completed
 ---
 
@@ -10,10 +10,12 @@ status: completed
 
 ## Epic Summary
 
-**Status**: ✅ COMPLETE
+**Status**: ✅ COMPLETE (second completion after Issue #32 reopen)
 **Started**: 2025-10-20T05:13:56Z
-**Completed**: 2025-10-20T07:01:58Z
-**Duration**: ~2 hours
+**First Completed**: 2025-10-20T07:01:58Z
+**Issue #32 Reopened**: 2025-10-20T07:46:00Z (bug: liquidity_value used incorrectly)
+**Final Completed**: 2025-10-20T09:50:00Z (hybrid filtering solution)
+**Total Duration**: ~4.5 hours (including bug fix)
 **Branch**: epic/core-calc-corrections
 **All 10 tasks completed successfully**
 
@@ -94,13 +96,19 @@ status: completed
 - **Files:** Modified `scripts/ff_tastytrade_scanner.py`
 
 #### Issue #32: Implement Volume-Based Liquidity Filter
-- **Status:** ✅ COMPLETE
-- **Completed:** 2025-10-20T06:00:00Z (estimated)
-- **Deliverables:**
-  - avg_options_volume_20d extraction
-  - Volume-based filtering (default: 10,000)
-  - Removed liquidity_rating references
-- **Files:** Modified `scripts/ff_tastytrade_scanner.py`
+- **Status:** ✅ COMPLETE (reopened + resolved with hybrid solution)
+- **First Completed:** 2025-10-20T06:00:00Z (estimated)
+- **Reopened:** 2025-10-20T07:46:00Z (bug: liquidity_value used incorrectly)
+- **Final Completed:** 2025-10-20T09:31:02Z (commit 894207a)
+- **Root Cause:** Original implementation used `liquidity_value` as volume proxy, but field shows inconsistent scaling (7.8x-419x variation)
+- **Investigation:** Documented in `.claude/epics/core-calc-corrections/updates/32/251020_0348_liquidity_value_analysis.md`
+- **Hybrid Solution:**
+  - Default mode (24/7): Uses `liquidity_rating >= 3` from Market Metrics
+  - Precise mode (market hours): Uses `--options-volume` flag for dxFeed option volume
+  - Added `liq_rating` column to CSV (40 columns total)
+  - Removed `--min-avg-volume` flag (replaced by --options-volume)
+- **Files:** Modified `scripts/ff_tastytrade_scanner.py`, `CLAUDE.md`, `scripts/README_TT.md`, created analysis doc
+- **Testing:** ✅ MSFT test passed (liq_rating=4, FF=0.36, both ATM and double calendars found)
 
 ### Integration Phase
 
@@ -145,14 +153,14 @@ status: completed
 - ✅ IV source: 100% Greeks usage as primary (exceeds 99% target)
 
 ### CSV Schema (v2.2)
-- ✅ 39 columns implemented (corrected from 32 in task descriptions)
+- ✅ 40 columns implemented (updated from 39 with liq_rating addition)
 - ✅ Structure-specific columns properly segregated
 - ✅ ATM: atm_ff, atm_delta, atm_iv_front/back/fwd, atm_iv_source_front/back
 - ✅ Double: min_ff (primary), combined_ff (reference), call/put FFs
-- ✅ Common: avg_options_volume_20d, skip_reason, earnings_source
+- ✅ Common: option_volume_today, liq_rating, skip_reason, earnings_source
 
 ### Feature Quality
-- ✅ Volume filter: Working correctly, proper skip tracking
+- ✅ Volume/liquidity filter: Hybrid system (default liquidity_rating, optional --options-volume)
 - ✅ Earnings filter: Multi-source pipeline with caching
 - ✅ Edge cases: Gracefully handled (missing data, non-existent symbols)
 - ✅ Performance: 2.5-4.1s per symbol (acceptable, scales well)
@@ -177,8 +185,8 @@ status: completed
    - Gating: Changed from combined_ff to min_ff (conservative)
 
 3. **All Structures**:
-   - Removed: liquidity_rating, liquidity_value
-   - Added: avg_options_volume_20d, skip_reason, earnings_source
+   - Removed: liquidity_value
+   - Added: option_volume_today, liq_rating, skip_reason, earnings_source
    - IV sources: Greeks primary (greeks), X-earn fallback (rare)
 
 ### Behavioral Changes
@@ -195,8 +203,10 @@ status: completed
    - Fallback: X-earn IV (expiration-level, rare use)
 
 4. **Liquidity Filtering**:
-   - Changed: Volume-based (avg_options_volume_20d)
-   - Removed: Rating-based (liquidity_rating)
+   - Changed: Hybrid system (default: liquidity_rating >= 3, optional: --options-volume for precise filtering)
+   - Default mode: 24/7 available (no market hours required)
+   - Precise mode: Requires market hours (9:30 AM - 4:00 PM ET)
+   - liq_rating always exported to CSV for transparency
 
 ## Performance Metrics
 

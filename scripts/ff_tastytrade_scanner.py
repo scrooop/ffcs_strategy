@@ -1263,13 +1263,9 @@ Examples:
     ap.add_argument("--sandbox", action="store_true",
                     help="Use sandbox environment (limited market data).")
 
-    # Earnings filtering flags (mutually exclusive group)
-    earnings_group = ap.add_mutually_exclusive_group()
-    earnings_group.add_argument("--skip-earnings", dest="skip_earnings", action="store_true",
-                                help="Skip positions with earnings conflicts (default).")
-    earnings_group.add_argument("--allow-earnings", dest="skip_earnings", action="store_false",
-                                help="Allow trading through earnings (disable earnings filtering).")
-    ap.set_defaults(skip_earnings=True)  # Set default: skip earnings by default
+    # Earnings filtering flags
+    ap.add_argument("--allow-earnings", action="store_true",
+                    help="Allow trading through earnings (default: filter earnings conflicts).")
     ap.add_argument("--show-earnings-conflicts", action="store_true",
                     help="Show filtered positions due to earnings.")
 
@@ -1309,8 +1305,6 @@ Examples:
         sys.exit(1)
 
     # Check for conflicting flags
-    # Note: --skip-earnings and --allow-earnings are mutually exclusive via argparse group
-
     if args.use_xearn_iv and args.force_greeks_iv:
         print("ERROR: --use-xearn-iv and --force-greeks-iv are mutually exclusive", file=sys.stderr)
         sys.exit(1)
@@ -1326,7 +1320,8 @@ Examples:
 
     # Early earnings pre-filter (NEW: Issue #16)
     # Filter symbols by earnings conflicts BEFORE any TastyTrade API calls
-    if args.skip_earnings:
+    # Default: filter earnings (unless --allow-earnings flag is set)
+    if not args.allow_earnings:
         start_time = time.time()
 
         # Initialize cache
@@ -1373,8 +1368,8 @@ Examples:
         tickers = passing_symbols
 
     # Run scan
-    # Both --skip-earnings and --allow-earnings set skip_earnings via mutually exclusive group
-    skip_earnings_flag = args.skip_earnings
+    # Default: filter earnings (unless --allow-earnings flag is set)
+    skip_earnings_flag = not args.allow_earnings
 
     rows = asyncio.run(scan(
         session, tickers, pairs, args.min_ff, args.dte_tolerance, args.timeout,

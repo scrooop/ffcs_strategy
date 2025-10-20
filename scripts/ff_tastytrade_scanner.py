@@ -777,68 +777,115 @@ def check_earnings_conflict(
 
     return (True, None)
 
-def check_volume(
+def check_liquidity_rating(
     symbol: str,
     metrics: Dict[str, any],
-    min_volume: float
+    min_rating: int = 3
 ) -> Tuple[bool, Optional[str]]:
     """
-    Check if symbol's average options volume meets minimum threshold.
+    Check if symbol's liquidity rating meets minimum threshold.
 
-    Uses liquidity_value from Market Metrics API as a proxy for average options volume.
-    This provides a transparent, volume-based filter replacing the opaque liquidity rating.
+    Uses liquidity_rating (0-5 scale) from Market Metrics API.
+    Rating 3 ≈ ~10k contracts/day average option volume.
 
     Args:
         symbol: Ticker symbol (e.g., 'SPY')
         metrics: Market metrics dict from fetch_market_metrics()
-        min_volume: Minimum acceptable average volume (default 10000)
+        min_rating: Minimum acceptable liquidity rating (default: 3)
 
     Returns:
         Tuple of (passes_filter, reason_string):
-        - (True, None): Meets threshold OR volume data unavailable OR futures symbol
+        - (True, None): Meets threshold OR rating unavailable OR futures symbol
         - (False, reason): Below threshold with explanation
 
-    Raises:
-        None (gracefully handles missing/invalid data with warnings to stderr)
-
     Note:
-        - Futures symbols without volume data are allowed through (not an error)
-        - Missing volume data for equities generates warning but allows through
+        - Available 24/7 (not streaming API)
+        - Futures symbols without rating are allowed through
+        - Missing rating generates warning but allows through
 
     Example:
-        >>> check_volume('SPY', metrics, min_volume=10000)
-        (True, None)  # SPY has volume ~117k
+        >>> check_liquidity_rating('SPY', metrics, min_rating=3)
+        (True, None)  # SPY has rating 5
 
-        >>> check_volume('ILLIQUID', metrics, min_volume=10000)
-        (False, 'Avg volume 5432.1 < 10000')
+        >>> check_liquidity_rating('ILLIQUID', metrics, min_rating=3)
+        (False, 'Liquidity rating 2 < 3')
     """
     if symbol not in metrics:
-        print(f"[WARN] {symbol}: Market metrics unavailable, skipping volume check", file=sys.stderr)
+        print(f"[WARN] {symbol}: Market metrics unavailable, skipping liquidity check", file=sys.stderr)
         return (True, None)
 
     metric_info = metrics[symbol]
 
-    # Check if liquidity_value (volume proxy) exists
-    avg_volume = getattr(metric_info, 'liquidity_value', None)
+    # Check if liquidity_rating exists
+    rating = getattr(metric_info, 'liquidity_rating', None)
 
-    # Handle futures symbols - allow through if volume field is missing
-    if is_futures_symbol(symbol) and avg_volume is None:
-        logger.debug(f"{symbol}: Futures symbol, volume check skipped (field missing)")
+    # Handle futures symbols - allow through if rating field is missing
+    if is_futures_symbol(symbol) and rating is None:
+        logger.debug(f"{symbol}: Futures symbol, liquidity check skipped (field missing)")
         return (True, None)
 
-    if avg_volume is None:
-        print(f"[WARN] {symbol}: Volume data unavailable, skipping volume check", file=sys.stderr)
+    if rating is None:
+        print(f"[WARN] {symbol}: Liquidity rating unavailable, skipping liquidity check", file=sys.stderr)
         return (True, None)
 
-    # Convert to float if needed
+    # Convert to int if needed
     try:
-        volume = float(avg_volume)
+        rating_int = int(rating)
     except (ValueError, TypeError):
-        print(f"[WARN] {symbol}: Invalid volume format, skipping volume check", file=sys.stderr)
+        print(f"[WARN] {symbol}: Invalid liquidity rating format, skipping liquidity check", file=sys.stderr)
         return (True, None)
 
-    if volume < min_volume:
-        reason = f"Avg volume {volume:.1f} < {min_volume}"
+    if rating_int < min_rating:
+        reason = f"Liquidity rating {rating_int} < {min_rating}"
+        return (False, reason)
+
+    return (True, None)
+
+def check_option_volume(
+    symbol: str,
+    option_volume: Optional[int],
+    min_volume: float
+) -> Tuple[bool, Optional[str]]:
+    """
+    Check if symbol's option volume meets minimum threshold.
+
+    Uses option_volume from dxFeed Underlying event (today's total chain volume).
+    Requires market hours (9:30 AM - 4:00 PM ET) for dxFeed streaming API.
+
+    Args:
+        symbol: Ticker symbol (e.g., 'SPY')
+        option_volume: Today's option chain volume from dxFeed Underlying event
+        min_volume: Minimum acceptable volume (default: 10000 contracts)
+
+    Returns:
+        Tuple of (passes_filter, reason_string):
+        - (True, None): Meets threshold OR volume unavailable
+        - (False, reason): Below threshold with explanation
+
+    Note:
+        - Only available during market hours (streaming API limitation)
+        - Missing volume data generates warning but allows through
+        - Futures symbols may not have option volume data
+
+    Example:
+        >>> check_option_volume('SPY', 150000, min_volume=10000)
+        (True, None)  # SPY has volume 150k
+
+        >>> check_option_volume('ILLIQUID', 5000, min_volume=10000)
+        (False, 'Option volume 5000 < 10000')
+    """
+    # Handle missing volume data gracefully
+    if option_volume is None:
+        print(f"[WARN] {symbol}: Option volume unavailable (may need market hours), skipping volume check", file=sys.stderr)
+        return (True, None)
+
+    # Handle futures symbols - allow through if volume is 0 or missing
+    if is_futures_symbol(symbol) and option_volume == 0:
+        logger.debug(f"{symbol}: Futures symbol with zero volume, check skipped")
+        return (True, None)
+
+    if option_volume < min_volume:
+        reason = f"Option volume {option_volume} < {min_volume}"
         return (False, reason)
 
     return (True, None)
@@ -894,7 +941,7 @@ def extract_xearn_iv(
 
 async def scan(session: Session, tickers: List[str], pairs: List[Tuple[int, int]],
                min_ff: float, dte_tolerance: int, timeout_s: float,
-               skip_earnings: bool = True, min_avg_volume: float = 10000,
+               skip_earnings: bool = True, options_volume_threshold: Optional[float] = None,
                skip_liquidity_check: bool = False, show_earnings_conflicts: bool = False,
                show_all_scans: bool = False, structure: str = "both",
                delta_tolerance: float = 0.05, earnings_data: Optional[Dict[str, dict]] = None) -> Tuple[List[dict], Dict[str, int], int, int]:
@@ -922,8 +969,9 @@ async def scan(session: Session, tickers: List[str], pairs: List[Tuple[int, int]
         dte_tolerance: Max deviation from target DTE in days (default 5)
         timeout_s: Greeks streaming timeout in seconds (default 3.0)
         skip_earnings: Filter out positions with earnings conflicts (default True)
-        min_avg_volume: Minimum average options volume (default 10000)
-        skip_liquidity_check: Disable liquidity filtering (default False)
+        options_volume_threshold: If set, use dxFeed option volume filtering (requires market hours).
+                                 If None (default), use liquidity_rating >= 3 (24/7 available).
+        skip_liquidity_check: Disable all volume/liquidity filtering (default False)
         show_earnings_conflicts: Include filtered positions in output (default False)
         show_all_scans: Show all results regardless of FF threshold (default False)
         structure: Calendar type: "atm-call", "double", or "both" (default "both")
@@ -932,7 +980,7 @@ async def scan(session: Session, tickers: List[str], pairs: List[Tuple[int, int]
 
     Returns:
         Tuple of (rows, skip_stats, scanned, passed):
-        - rows: List of dict rows with 33-column unified CSV schema:
+        - rows: List of dict rows with 40-column unified CSV schema:
           - timestamp, symbol, structure
           - call_ff, put_ff, combined_ff, min_ff (FF metrics)
           - spot_price, front_dte, back_dte, front_expiry, back_expiry
@@ -941,6 +989,7 @@ async def scan(session: Session, tickers: List[str], pairs: List[Tuple[int, int]
           - put_front_iv, put_back_iv, put_fwd_iv (put leg IVs)
           - earnings_conflict, earnings_date
           - option_volume_today (today's total option chain volume from dxFeed Underlying)
+          - liq_rating (liquidity rating 0-5 from Market Metrics)
           - iv_source_call_front, iv_source_call_back (call leg IV sources: "xearn" or "greeks")
           - iv_source_put_front, iv_source_put_back (put leg IV sources)
           - earnings_source (data source: "cache", "yahoo", "tastytrade", "none", or "skipped")
@@ -1023,9 +1072,10 @@ async def scan(session: Session, tickers: List[str], pairs: List[Tuple[int, int]
                 print(f"[WARN] Could not get market data for {sym}: {e}, skipping.", file=sys.stderr)
                 continue
 
-        # 2) Extract earnings data for this symbol
+        # 2) Extract earnings data and liquidity rating for this symbol
         earnings_date = None
         earnings_source = "none"  # Default: no earnings data found
+        liq_rating = None  # Liquidity rating (0-5 scale)
 
         if sym in market_metrics:
             metric_info = market_metrics[sym]
@@ -1033,22 +1083,26 @@ async def scan(session: Session, tickers: List[str], pairs: List[Tuple[int, int]
             if earnings:
                 earnings_date = getattr(earnings, 'expected_report_date', None)
 
+            # Extract liquidity_rating for CSV output
+            liq_rating = getattr(metric_info, 'liquidity_rating', None)
+
         # Determine earnings_source from earnings_data dict (if provided)
         if earnings_data is not None and sym in earnings_data:
             earnings_source = earnings_data[sym].get('source', 'none')
 
-        # 2b) Fetch today's option volume from dxFeed Underlying event
+        # 2b) Fetch today's option volume from dxFeed Underlying event (only if using --options-volume)
         option_volume = None
-        try:
-            underlying_event = await snapshot_underlying(session, sym, timeout_s=timeout_s)
-            if underlying_event is not None:
-                option_volume = underlying_event.option_volume
-                logger.info(f"{sym}: Option volume today: {option_volume}")
-            else:
-                logger.warning(f"{sym}: No Underlying event received")
-        except Exception as e:
-            logger.warning(f"{sym}: Failed to fetch Underlying event: {e}")
-            option_volume = None
+        if options_volume_threshold is not None:
+            try:
+                underlying_event = await snapshot_underlying(session, sym, timeout_s=timeout_s)
+                if underlying_event is not None:
+                    option_volume = underlying_event.option_volume
+                    logger.info(f"{sym}: Option volume today: {option_volume}")
+                else:
+                    logger.warning(f"{sym}: No Underlying event received")
+            except Exception as e:
+                logger.warning(f"{sym}: Failed to fetch Underlying event: {e}")
+                option_volume = None
 
         # 3) Chain (nested) - handle futures vs equity
         if is_futures_symbol(sym):
@@ -1090,15 +1144,24 @@ async def scan(session: Session, tickers: List[str], pairs: List[Tuple[int, int]
                     filtered_rows.append({"symbol": sym, "reason": reason})
                 continue
 
+        # 2.5.2) Liquidity filtering (choose between two modes)
         if not skip_liquidity_check:
-            # Check if option volume meets minimum threshold
-            if option_volume is None:
-                logger.info(f"{sym}: Option volume unavailable, allowing through")
-            elif option_volume < min_avg_volume:
-                skip_stats[SKIP_VOLUME_TOO_LOW] += 1
-                logger.info(f"{sym}: Option volume {option_volume:.0f} < {min_avg_volume:.0f}, skipping")
-                print(f"[INFO] {sym}: Option volume {option_volume:.0f} below threshold {min_avg_volume:.0f}, skipping", file=sys.stderr)
-                continue
+            if options_volume_threshold is not None:
+                # Mode 1: Use dxFeed option volume (requires market hours)
+                passes, reason = check_option_volume(sym, option_volume, options_volume_threshold)
+                if not passes:
+                    skip_stats[SKIP_VOLUME_TOO_LOW] += 1
+                    logger.info(f"{sym}: {reason}")
+                    print(f"[FILTERED] {sym}: {reason}", file=sys.stderr)
+                    continue
+            else:
+                # Mode 2: Use liquidity_rating from Market Metrics (24/7 available)
+                passes, reason = check_liquidity_rating(sym, market_metrics, min_rating=3)
+                if not passes:
+                    skip_stats[SKIP_VOLUME_TOO_LOW] += 1  # Reuse same skip reason for both modes
+                    logger.info(f"{sym}: {reason}")
+                    print(f"[FILTERED] {sym}: {reason}", file=sys.stderr)
+                    continue
 
         # 4) Branch based on calendar structure mode
         required_targets = sorted(set([t for pair in pairs for t in pair]))
@@ -1324,10 +1387,11 @@ async def scan(session: Session, tickers: List[str], pairs: List[Tuple[int, int]
                         "iv_source_call_back": call_iv_source_back,
                         "iv_source_put_front": put_iv_source_front,
                         "iv_source_put_back": put_iv_source_back,
-                        # Quality filters (4)
+                        # Quality filters (5)
                         "earnings_conflict": "no" if not earnings_date else "",
                         "earnings_date": earnings_date.isoformat() if earnings_date else "",
                         "option_volume_today": f"{option_volume:.0f}" if option_volume is not None else "",
+                        "liq_rating": str(liq_rating) if liq_rating is not None else "",
                         "earnings_source": earnings_source,
                         # Tracking (1)
                         "skip_reason": ""
@@ -1523,10 +1587,11 @@ async def scan(session: Session, tickers: List[str], pairs: List[Tuple[int, int]
                         "iv_source_call_back": call_iv_src_back,
                         "iv_source_put_front": put_iv_src_front,
                         "iv_source_put_back": put_iv_src_back,
-                        # Quality filters (4)
+                        # Quality filters (5)
                         "earnings_conflict": "no" if not earnings_date else "",
                         "earnings_date": earnings_date.isoformat() if earnings_date else "",
                         "option_volume_today": f"{option_volume:.0f}" if option_volume is not None else "",
+                        "liq_rating": str(liq_rating) if liq_rating is not None else "",
                         "earnings_source": earnings_source,
                         # Tracking (1)
                         "skip_reason": ""
@@ -1601,6 +1666,12 @@ Examples:
   # Allow trading through earnings (disable earnings filter)
   python ff_tastytrade_scanner.py --tickers AAPL --pairs 30-90 --allow-earnings
 
+  # Use precise option volume filtering (requires market hours, default: 10k threshold)
+  python ff_tastytrade_scanner.py --tickers SPY QQQ --pairs 30-60 --options-volume
+
+  # Use precise option volume with custom threshold (requires market hours)
+  python ff_tastytrade_scanner.py --tickers SPY QQQ --pairs 30-60 --options-volume 5000
+
   # Adjust delta tolerance for double calendars (tighter selection)
   python ff_tastytrade_scanner.py --tickers SPY --pairs 30-60 --structure double --delta-tolerance 0.03
         """,
@@ -1634,10 +1705,13 @@ Examples:
                     help="Show filtered positions due to earnings.")
 
     # Volume filtering flags
-    ap.add_argument("--min-avg-volume", type=float, default=10000,
-                    help="Minimum average options volume (default: 10000 contracts/day).")
+    ap.add_argument("--options-volume", type=float, nargs='?', const=10000, default=None,
+                    help="Use dxFeed option volume filtering (requires market hours). "
+                         "Default threshold: 10000 contracts. "
+                         "If omitted, uses liquidity_rating >= 3 (24/7 available). "
+                         "Examples: --options-volume (>=10k), --options-volume 5000 (>=5k).")
     ap.add_argument("--skip-liquidity-check", action="store_true",
-                    help="Disable volume filtering.")
+                    help="Disable all volume/liquidity filtering.")
 
     # Debug/analysis flags
     ap.add_argument("--show-all-scans", action="store_true",
@@ -1757,7 +1831,7 @@ Examples:
     rows, skip_stats, scanned, passed = asyncio.run(scan(
         session, tickers, pairs, args.min_ff, args.dte_tolerance, args.timeout,
         skip_earnings=skip_earnings_flag,
-        min_avg_volume=args.min_avg_volume,
+        options_volume_threshold=args.options_volume,
         skip_liquidity_check=args.skip_liquidity_check,
         show_earnings_conflicts=args.show_earnings_conflicts,
         show_all_scans=args.show_all_scans,
@@ -1766,9 +1840,10 @@ Examples:
         earnings_data=earnings_data
     ))
 
-    # v2.2 CSV schema (39 columns)
+    # v2.2 CSV schema (40 columns)
     # Breaking changes from v2.1:
     # - Added: atm_iv_source_front, atm_iv_source_back (ATM-specific IV source tracking)
+    # - Added: liq_rating (liquidity_rating 0-5 from Market Metrics)
     # - Renamed: avg_options_volume_20d → option_volume_today (now using dxFeed Underlying.optionVolume)
     # - Reordered: Logical grouping by structure (common, ATM, double, IV detail, sources, quality)
     cols = [
@@ -1788,9 +1863,9 @@ Examples:
         # IV sources - double (4)
         "iv_source_call_front", "iv_source_call_back",
         "iv_source_put_front", "iv_source_put_back",
-        # Quality filters (4)
+        # Quality filters (5)
         "earnings_conflict", "earnings_date",
-        "option_volume_today", "earnings_source",
+        "option_volume_today", "liq_rating", "earnings_source",
         # Tracking (1)
         "skip_reason"
     ]

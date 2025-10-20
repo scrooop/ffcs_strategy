@@ -34,8 +34,8 @@ The FF Scanner is a production-ready CLI tool that scans liquid options to ident
 - ✅ **50Δ ATM Strike Selection**: Delta-based ATM selection (0.50 absolute delta) instead of spot-based
 - ✅ **Simplified ATM FF Calculation**: Single `atm_ff` using averaged IVs (replaces dual call_ff/put_ff)
 - ✅ **Min-Gating for Double Calendars**: `min_ff` column for conservative worst-case filtering
-- ✅ **Volume-Based Liquidity**: Transparent avg_options_volume_20d replaces opaque rating system
-- ✅ **Enhanced CSV Output**: 39-column schema (31 → 39, +9 columns)
+- ✅ **Hybrid Liquidity Filtering**: liquidity_rating (default, 24/7) or option_volume (precise, market hours)
+- ✅ **Enhanced CSV Output**: 40-column schema (31 → 40, +10 columns)
 
 **v2.1 Enhancements:**
 - ✅ **Fast Earnings Check**: 80-95% runtime reduction with SQLite cache (1000 symbols: 8min → <30s)
@@ -159,7 +159,7 @@ python scripts/ff_tastytrade_scanner.py \
   --tickers SPY QQQ AAPL TSLA NVDA META AMZN GOOGL MSFT AMD \
   --pairs 30-60 30-90 60-90 \
   --min-ff 0.23 \
-  --min-avg-volume 10000 \
+  
   --structure both \
   --csv-out "$(date +%y%m%d_%H%M)_ff_scan.csv"
 ```
@@ -270,8 +270,16 @@ python scripts/ff_tastytrade_scanner.py \
 
 | Flag | Type | Default | Description |
 |------|------|---------|-------------|
-| `--min-avg-volume` | float | `10000` | Minimum average options volume (contracts/day). Transparent, numerical threshold. |
-| `--skip-liquidity-check` | flag | `False` | Disable volume filtering (not recommended). |
+| `--options-volume [THRESHOLD]` | optional float | `None` | Use dxFeed option volume filtering (requires market hours). Default threshold: 10000. Example: `--options-volume` or `--options-volume 5000`. |
+| `--skip-liquidity-check` | flag | `False` | Disable all volume/liquidity filtering (not recommended). |
+
+**Default Behavior (24/7):**
+- Scanner uses `liquidity_rating >= 3` from Market Metrics (~10k volume equivalent)
+- No need for market hours, works anytime
+
+**Precise Mode (Market Hours):**
+- Use `--options-volume` for exact dxFeed option volume filtering
+- Requires market hours (9:30 AM - 4:00 PM ET)
 
 **Recommended Thresholds:**
 - `10000`: Standard (≈10k+ contracts/day avg volume) - Use for production
@@ -380,20 +388,25 @@ The original research required "20-day average option volume above 10,000 contra
 
 **Flags:**
 
-- `--min-avg-volume 10000`: Default threshold (≈10k+ contracts/day)
-- `--skip-liquidity-check`: Disable liquidity filtering (not recommended)
+- **Default (no flag):** Uses `liquidity_rating >= 3` (~10k equivalent, 24/7 available)
+- `--options-volume`: Precise volume filtering, 10k threshold (requires market hours)
+- `--options-volume 5000`: Custom threshold (requires market hours)
+- `--skip-liquidity-check`: Disable all filtering (not recommended)
 
-**Example:**
+**Examples:**
 
 ```bash
-# Standard liquidity (≈10k+ contracts/day)
-python scripts/ff_tastytrade_scanner.py --tickers SPY QQQ AAPL --min-avg-volume 10000
+# Default: liquidity_rating filtering (works 24/7)
+python scripts/ff_tastytrade_scanner.py --tickers SPY QQQ AAPL
 
-# High liquidity only (≈50k+ contracts/day)
-python scripts/ff_tastytrade_scanner.py --tickers SPY QQQ --min-avg-volume 50000
+# Precise volume filtering during market hours (10k threshold)
+python scripts/ff_tastytrade_scanner.py --tickers SPY QQQ --options-volume
 
-# Allow lower liquidity (≈1k+ contracts/day)
-python scripts/ff_tastytrade_scanner.py --tickers SPY QQQ AAPL TSLA --min-avg-volume 5000
+# Precise volume filtering with custom threshold (market hours)
+python scripts/ff_tastytrade_scanner.py --tickers SPY QQQ --options-volume 50000
+
+# Disable all filtering (not recommended)
+python scripts/ff_tastytrade_scanner.py --tickers SPY QQQ --skip-liquidity-check
 ```
 
 **Edge Cases:**
@@ -539,7 +552,7 @@ For a 30-60 DTE calendar spread, the scanner will report **three different FF va
 
 ## CSV Output Schema
 
-### 39-Column Schema (v2.2)
+### 40-Column Schema (v2.2)
 
 The scanner outputs a unified CSV schema that supports both ATM and double calendar structures. Empty columns are left blank (not "N/A" or "null").
 
@@ -672,12 +685,16 @@ python scripts/ff_tastytrade_scanner.py --tickers SPY QQQ --pairs 30-60 60-90 --
 
 ### Liquidity Thresholds
 
-**Recommended:**
-- `--min-avg-volume 10000`: Standard (≈10k+ contracts/day) - **Use for production**
-- `--min-avg-volume 50000`: High liquidity (≈50k+ contracts/day) - **Use for large position sizes**
+**Default (24/7):**
+- No flag needed - Uses `liquidity_rating >= 3` (~10k equivalent)
+- Best for most use cases
+
+**Precise Mode (Market Hours):**
+- `--options-volume`: Standard (10k threshold) - **Use for production**
+- `--options-volume 50000`: High liquidity - **Use for large position sizes**
+- `--options-volume 5000`: Lower threshold - Risk of wide spreads
 
 **Not Recommended:**
-- `--min-avg-volume 5000`: Low liquidity (≈1-5k contracts/day) - Risk of wide spreads
 - `--skip-liquidity-check`: No filtering - Risk of illiquid options
 
 ### Position Sizing Guidelines
@@ -834,9 +851,9 @@ python scripts/ff_tastytrade_scanner.py --tickers SPY --pairs 30-60 --dte-tolera
    - **Solution:** Run with `--show-earnings-conflicts` to see what was filtered
    - **Solution:** If intentional, use `--allow-earnings` to disable filter
 
-2. **All symbols filtered by volume**
-   - **Solution:** Lower `--min-avg-volume` (try `5000` instead of `10000`)
-   - **Solution:** Use `--skip-liquidity-check` for testing
+2. **All symbols filtered by volume/liquidity**
+   - **Solution:** Use `--skip-liquidity-check` temporarily to diagnose
+   - **Note:** Default uses liquidity_rating (should rarely filter major names)
 
 3. **FF threshold too high**
    - **Solution:** Lower `--min-ff` (try `0.15` or `0.10`)
@@ -935,7 +952,7 @@ python scripts/ff_tastytrade_scanner.py \
   --tickers SPY QQQ AAPL TSLA NVDA META AMZN GOOGL MSFT AMD \
   --pairs 30-60 30-90 60-90 \
   --min-ff 0.23 \
-  --min-avg-volume 10000 \
+  
   --structure both \
   --csv-out "$(date +%y%m%d_%H%M)_ff_scan.csv"
 ```
@@ -951,7 +968,6 @@ python scripts/ff_tastytrade_scanner.py \
   --tickers SPY QQQ IWM AAPL TSLA NVDA META AMZN GOOGL MSFT AMD \
   --pairs 30-60 60-90 \
   --min-ff 0.10 \
-  --min-avg-volume 5000 \
   --structure both \
   --allow-earnings \
   --csv-out aggressive_scan.csv
@@ -966,7 +982,7 @@ python scripts/ff_tastytrade_scanner.py \
   --tickers SPY QQQ \
   --pairs 30-60 60-90 \
   --min-ff 0.20 \
-  --min-avg-volume 100000 \
+  --options-volume 100000 \
   --structure both \
   --csv-out megacap_scan.csv
 ```
@@ -1141,7 +1157,7 @@ python -m pip uninstall tastytrade
 
 ## Version History
 
-- **v2.2** (October 2025): Core calculation corrections - 50Δ ATM strike selection, simplified ATM FF calculation (single atm_ff), double calendar min-gating (min_ff column), volume-based liquidity (option_volume_today from dxFeed Underlying), 39-column CSV schema (+9 columns)
+- **v2.2** (October 2025): Core calculation corrections - 50Δ ATM strike selection, simplified ATM FF calculation (single atm_ff), double calendar min-gating (min_ff column), hybrid liquidity filtering (liquidity_rating default + optional option_volume), 40-column CSV schema (+10 columns)
 - **v2.1** (October 2025): Fast earnings check with caching (80-95% runtime reduction), multi-source earnings pipeline (Cache → Yahoo → TastyTrade), 31-column CSV schema with earnings_source tracking, CLI cleanup
 - **v2.0** (October 2025): Earnings filtering, liquidity screening, X-earn IV support, double calendar scanning, enhanced CSV output (28 columns)
 - **v1.0** (Initial release): ATM calendar scanning with Forward Factor calculation

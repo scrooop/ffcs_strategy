@@ -157,12 +157,15 @@ python scripts/ff_tastytrade_scanner.py \
 - `--allow-earnings`: Allow trading through earnings (disable earnings filtering)
 - `--show-earnings-conflicts`: Show filtered positions due to earnings
 
-**Volume Filtering:**
-- `--min-avg-volume`: Minimum average options volume (default: 10000 contracts/day)
-- `--skip-liquidity-check`: Disable volume filtering
+**Volume/Liquidity Filtering:**
+- **Default:** Uses `liquidity_rating >= 3` from Market Metrics (24/7 available, ~10k volume equivalent)
+- `--options-volume [THRESHOLD]`: Use precise dxFeed option volume filtering (requires market hours)
+  - No value: threshold = 10,000 contracts
+  - With value: threshold = custom value (e.g., `--options-volume 5000`)
+- `--skip-liquidity-check`: Disable all volume/liquidity filtering
 
 **Output Options:**
-- `--csv-out`: Write results to CSV file (recommended, 39-column schema)
+- `--csv-out`: Write results to CSV file (recommended, 40-column schema)
 - `--json-out`: Write results to JSON file
 - `--sandbox`: Use sandbox environment (production required for live Greeks)
 - `--show-all-scans`: Show all scan results regardless of FF threshold (for testing)
@@ -296,7 +299,7 @@ Given the same underlying and term structure, the three calendar structures will
 - `snapshot_greeks()`: Fetches actual IV from dxFeed for each specific strike
 - Forward IV calculation uses these strike-specific IVs, not interpolated surface values
 
-### CSV Output Schema (39 Columns - v2.2)
+### CSV Output Schema (40 Columns - v2.2)
 
 Results are sorted by `atm_ff` (for ATM structure) or `min_ff` (for double structure) descending (highest opportunities first).
 
@@ -347,33 +350,34 @@ Results are sorted by `atm_ff` (for ATM structure) or `min_ff` (for double struc
 - `iv_source_put_front`, `iv_source_put_back`: Put IV sources ("greeks" or "exearn_fallback")
 - For ATM: Empty (use `atm_iv_source_front/back` instead)
 
-**Quality Filter Columns (All Structures - 4 columns):**
+**Quality Filter Columns (All Structures - 5 columns):**
 - `earnings_conflict`: "yes" or "no"
 - `earnings_date`: Next earnings date (YYYY-MM-DD, empty if none)
-- `option_volume_today`: Today's total option chain volume (from dxFeed Underlying.optionVolume - all strikes/expirations/types)
+- `option_volume_today`: Today's total option chain volume (from dxFeed Underlying.optionVolume - all strikes/expirations/types, empty if not using --options-volume)
+- `liq_rating`: Liquidity rating 0-5 from Market Metrics API (used for default 24/7 filtering)
 - `earnings_source`: Earnings data source ("cache", "yahoo", "tastytrade", "none", or "skipped")
 
 **Tracking Column (All Structures - 1 column):**
 - `skip_reason`: Reason symbol was filtered (e.g., "earnings_conflict", "volume_too_low", "no_strikes", empty if not skipped)
 
-**Complete Column Order (39 columns):**
-`timestamp`, `symbol`, `structure`, `spot_price`, `front_dte`, `back_dte`, `front_expiry`, `back_expiry`, `atm_strike`, `atm_delta`, `atm_ff`, `atm_iv_front`, `atm_iv_back`, `atm_fwd_iv`, `atm_iv_source_front`, `atm_iv_source_back`, `call_strike`, `put_strike`, `call_delta`, `put_delta`, `call_ff`, `put_ff`, `min_ff`, `combined_ff`, `call_front_iv`, `call_back_iv`, `call_fwd_iv`, `put_front_iv`, `put_back_iv`, `put_fwd_iv`, `iv_source_call_front`, `iv_source_call_back`, `iv_source_put_front`, `iv_source_put_back`, `earnings_conflict`, `earnings_date`, `option_volume_today`, `earnings_source`, `skip_reason`
+**Complete Column Order (40 columns):**
+`timestamp`, `symbol`, `structure`, `spot_price`, `front_dte`, `back_dte`, `front_expiry`, `back_expiry`, `atm_strike`, `atm_delta`, `atm_ff`, `atm_iv_front`, `atm_iv_back`, `atm_fwd_iv`, `atm_iv_source_front`, `atm_iv_source_back`, `call_strike`, `put_strike`, `call_delta`, `put_delta`, `call_ff`, `put_ff`, `min_ff`, `combined_ff`, `call_front_iv`, `call_back_iv`, `call_fwd_iv`, `put_front_iv`, `put_back_iv`, `put_fwd_iv`, `iv_source_call_front`, `iv_source_call_back`, `iv_source_put_front`, `iv_source_put_back`, `earnings_conflict`, `earnings_date`, `option_volume_today`, `liq_rating`, `earnings_source`, `skip_reason`
 
 ### Migration Guide: v2.1 → v2.2
 
 **Schema Changes:**
-- Column count: 31 → 39 (+9 columns, -1 renamed)
+- Column count: 31 → 40 (+10 columns, -1 renamed)
 - ATM structure: New dedicated columns for simplified single-FF workflow
 - Double structure: Added `min_ff` for filtering worst-case leg
-- Volume filtering: Renamed column for clarity, removed liquidity rating
+- Volume filtering: Hybrid system with liquidity_rating (default) and option_volume (optional)
 
 **Column Mapping Table:**
 
 | v2.1 Column | v2.2 Column | Notes |
 |-------------|-------------|-------|
-| `avg_options_volume` | `option_volume_today` | Changed to today's volume from dxFeed Underlying.optionVolume |
-| `liquidity_rating` | (removed) | Replaced by transparent volume filtering |
-| `liquidity_value` | (removed) | Now use `option_volume_today` directly |
+| `avg_options_volume` | `option_volume_today` | Changed to today's volume from dxFeed (only populated with --options-volume) |
+| `liquidity_rating` | `liq_rating` | Now always exported to CSV (0-5 scale, used for default filtering) |
+| `liquidity_value` | (removed) | Replaced by liq_rating and option_volume_today |
 | N/A | `atm_strike` | NEW: Strike with delta closest to 50Δ |
 | N/A | `atm_delta` | NEW: Actual delta of selected ATM strike |
 | N/A | `atm_ff` | NEW: Single FF for ATM structure (replaces dual call_ff/put_ff) |
@@ -421,20 +425,22 @@ Results are sorted by `atm_ff` (for ATM structure) or `min_ff` (for double struc
 Removed (no longer supported):
 - `--use-xearn-iv` (ex-earn IV now rare fallback, not primary)
 - `--force-greeks-iv` (Greeks IV now always primary)
-- `--min-liquidity-rating` (replaced by `--min-avg-volume`)
+- `--min-liquidity-rating` (replaced by hybrid liquidity system)
+- `--min-avg-volume` (replaced by --options-volume)
 
 Updated:
-- `--min-avg-volume`: Volume-based filtering (default: 10000 contracts/day)
-- `--skip-liquidity-check`: Disables volume filtering (unchanged)
+- `--options-volume [THRESHOLD]`: Precise volume filtering (optional, requires market hours)
+- `--skip-liquidity-check`: Disables all volume/liquidity filtering (unchanged)
 
 **Migration Steps for CSV Consumers:**
 
-1. **Update column count:** 31 → 39
-2. **Add new columns:** Parse `atm_strike`, `atm_delta`, `atm_ff`, `atm_iv_*`, `min_ff`, `skip_reason`
-3. **Rename column:** `avg_options_volume` → `option_volume_today` (data change: today's volume, not 20-day average)
-4. **Remove column references:** Delete `liquidity_rating`, `liquidity_value` from parsers
-5. **Update ATM logic:** Check `atm_ff` for ATM structures (not `call_ff`/`put_ff`/`combined_ff`)
-6. **Update double logic:** Use `min_ff` for filtering, `combined_ff` for ranking
+1. **Update column count:** 31 → 40
+2. **Add new columns:** Parse `atm_strike`, `atm_delta`, `atm_ff`, `atm_iv_*`, `min_ff`, `liq_rating`, `skip_reason`
+3. **Rename column:** `avg_options_volume` → `option_volume_today` (may be empty if not using --options-volume)
+4. **Rename column:** `liquidity_rating` → `liq_rating` (always populated now)
+5. **Remove column references:** Delete `liquidity_value` from parsers
+6. **Update ATM logic:** Check `atm_ff` for ATM structures (not `call_ff`/`put_ff`/`combined_ff`)
+7. **Update double logic:** Use `min_ff` for filtering, `combined_ff` for ranking
 7. **Update filters:** Replace liquidity rating checks with volume checks (`>= 10000`)
 
 **Example v2.2 CSV Parsing (Python):**
@@ -516,12 +522,15 @@ filtered = df[df["option_volume_today"] >= 10000]  # v2.2: today's volume from d
 - Debugging: Use `--show-earnings-conflicts` to see what was filtered
 - Cache location: `.cache/earnings.db` (safe to delete, rebuilds automatically)
 
-### Volume Filtering (v2.2)
-- **Transparent volume-based filter:** Uses avg options volume from Market Metrics API
-- Default: ≥10,000 contracts/day (liquidity_value field as proxy)
-- Override: Use `--skip-liquidity-check` to disable filtering
-- Adjustable: Use `--min-avg-volume` to set custom threshold
-- Futures handling: Symbols without volume data are allowed through (not an error)
+### Volume/Liquidity Filtering (v2.2)
+- **Hybrid filtering system:** Choose between two modes
+- **Default mode (24/7):** Uses `liquidity_rating >= 3` from Market Metrics API (~10k volume equivalent)
+- **Precise mode (market hours):** Use `--options-volume [THRESHOLD]` for dxFeed option volume filtering
+  - Without value: `--options-volume` uses 10,000 threshold
+  - With value: `--options-volume 5000` uses custom threshold
+- Override: Use `--skip-liquidity-check` to disable all filtering
+- Futures handling: Symbols without data are allowed through (not an error)
+- **liq_rating column:** Always exported to CSV for transparency (0-5 scale)
 
 ### Double Calendar Strike Selection (v2.0)
 - Target: ±35Δ strikes with configurable tolerance
@@ -733,8 +742,8 @@ Scanner could be extended with:
 - ATM strike selection: Now uses 50Δ strike (closest to 0.50 absolute delta) instead of spot-based selection
 - ATM FF calculation: Simplified to single `atm_ff` using averaged IVs (replaced dual call_ff/put_ff approach)
 - Double calendar filtering: Added `min_ff` (minimum of call_ff and put_ff) for conservative worst-case filtering
-- Volume filtering: Replaced opaque liquidity rating with transparent avg options volume (20-day average)
-- CSV schema: Expanded from 31 to 39 columns (+9 new columns, -1 renamed)
+- Volume filtering: Hybrid system with liquidity_rating (default, 24/7) and option_volume (optional, market hours)
+- CSV schema: Expanded from 31 to 40 columns (+10 new columns, -1 renamed)
 
 **New Columns:**
 - `atm_strike`, `atm_delta`, `atm_ff`: ATM-specific strike selection and FF calculation

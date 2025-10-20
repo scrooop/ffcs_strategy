@@ -717,7 +717,7 @@ async def scan(session: Session, tickers: List[str], pairs: List[Tuple[int, int]
                skip_liquidity_check: bool = False, show_earnings_conflicts: bool = False,
                use_xearn_iv: bool = True, force_greeks_iv: bool = False,
                show_all_scans: bool = False, structure: str = "both",
-               delta_tolerance: float = 0.05) -> List[dict]:
+               delta_tolerance: float = 0.05, earnings_data: Optional[Dict[str, dict]] = None) -> List[dict]:
     """
     Main scanner function: Find calendar spread opportunities with high forward factors.
 
@@ -750,9 +750,10 @@ async def scan(session: Session, tickers: List[str], pairs: List[Tuple[int, int]
         show_all_scans: Show all results regardless of FF threshold (default False)
         structure: Calendar type: "atm-call", "double", or "both" (default "both")
         delta_tolerance: Max delta deviation for double calendars (default 0.05 = ±5Δ)
+        earnings_data: Optional earnings data dict from EarningsCache (default None)
 
     Returns:
-        List of dict rows with 28-column unified CSV schema:
+        List of dict rows with 29-column unified CSV schema:
         - timestamp, symbol, structure
         - call_ff, put_ff, combined_ff (FF metrics - primary sort key)
         - spot_price, front_dte, back_dte, front_expiry, back_expiry
@@ -763,6 +764,7 @@ async def scan(session: Session, tickers: List[str], pairs: List[Tuple[int, int]
         - liquidity_rating, liquidity_value
         - iv_source_call_front, iv_source_call_back (call leg IV sources: "xearn" or "greeks")
         - iv_source_put_front, iv_source_put_back (put leg IV sources)
+        - earnings_source (data source: "cache", "yahoo", "tastytrade", "none", or "skipped")
 
         For ATM calendars: call and put IVs are from same strike (may differ slightly)
         For double calendars: call and put IVs are from different strikes (+35Δ vs -35Δ)
@@ -817,12 +819,18 @@ async def scan(session: Session, tickers: List[str], pairs: List[Tuple[int, int]
         # 2) Extract earnings and liquidity data for this symbol
         earnings_date = None
         liquidity_rating = None
+        earnings_source = "none"  # Default: no earnings data found
+
         if sym in market_metrics:
             metric_info = market_metrics[sym]
             earnings = getattr(metric_info, 'earnings', None)
             if earnings:
                 earnings_date = getattr(earnings, 'expected_report_date', None)
             liquidity_rating = getattr(metric_info, 'liquidity_rating', None)
+
+        # Determine earnings_source from earnings_data dict (if provided)
+        if earnings_data is not None and sym in earnings_data:
+            earnings_source = earnings_data[sym].get('source', 'none')
 
         # 3) Chain (nested) - handle futures vs equity
         if is_futures_symbol(sym):
@@ -1034,7 +1042,8 @@ async def scan(session: Session, tickers: List[str], pairs: List[Tuple[int, int]
                         "iv_source_call_front": call_iv_source_front,
                         "iv_source_call_back": call_iv_source_back,
                         "iv_source_put_front": put_iv_source_front,
-                        "iv_source_put_back": put_iv_source_back
+                        "iv_source_put_back": put_iv_source_back,
+                        "earnings_source": earnings_source
                     })
 
         if scan_atm:
@@ -1187,7 +1196,8 @@ async def scan(session: Session, tickers: List[str], pairs: List[Tuple[int, int]
                         "iv_source_call_front": call_iv_src_front,
                         "iv_source_call_back": call_iv_src_back,
                         "iv_source_put_front": put_iv_src_front,
-                        "iv_source_put_back": put_iv_src_back
+                        "iv_source_put_back": put_iv_src_back,
+                        "earnings_source": earnings_source
                     })
 
     # Sort by combined_ff descending (highest FF first), then by symbol ascending
@@ -1321,6 +1331,8 @@ Examples:
     # Early earnings pre-filter (NEW: Issue #16)
     # Filter symbols by earnings conflicts BEFORE any TastyTrade API calls
     # Default: filter earnings (unless --allow-earnings flag is set)
+    earnings_data = None  # Initialize earnings_data (will be populated or set to dummy)
+
     if not args.allow_earnings:
         start_time = time.time()
 
@@ -1366,6 +1378,10 @@ Examples:
 
         # Only process passing symbols
         tickers = passing_symbols
+    else:
+        # If --allow-earnings is set, create dummy earnings_data with "skipped" source
+        # This ensures earnings_source column shows "skipped" for all symbols
+        earnings_data = {symbol: {'source': 'skipped', 'next_earnings': None} for symbol in tickers}
 
     # Run scan
     # Default: filter earnings (unless --allow-earnings flag is set)
@@ -1381,10 +1397,11 @@ Examples:
         force_greeks_iv=args.force_greeks_iv,
         show_all_scans=args.show_all_scans,
         structure=args.structure,
-        delta_tolerance=args.delta_tolerance
+        delta_tolerance=args.delta_tolerance,
+        earnings_data=earnings_data
     ))
 
-    # Unified 28-column CSV schema
+    # Unified 29-column CSV schema
     cols = [
         "timestamp", "symbol", "structure",
         "call_ff", "put_ff", "combined_ff",
@@ -1396,7 +1413,8 @@ Examples:
         "earnings_conflict", "earnings_date",
         "liquidity_rating", "liquidity_value",
         "iv_source_call_front", "iv_source_call_back",
-        "iv_source_put_front", "iv_source_put_back"
+        "iv_source_put_front", "iv_source_put_back",
+        "earnings_source"
     ]
 
     if not rows:

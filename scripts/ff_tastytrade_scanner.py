@@ -343,6 +343,7 @@ async def snapshot_greeks(session: Session, streamer_symbols: List[str], timeout
         Partial results are acceptable on timeout. Caller should handle missing data.
     """
     raw_results: Dict[str, Greeks] = {}
+    collector_task = None
 
     try:
         async with DXLinkStreamer(session) as streamer:
@@ -350,19 +351,36 @@ async def snapshot_greeks(session: Session, streamer_symbols: List[str], timeout
                 await streamer.subscribe(Greeks, streamer_symbols)
 
                 async def collector():
-                    async for g in streamer.listen(Greeks):
-                        raw_results[g.event_symbol] = g
-                        if len(raw_results) >= len(streamer_symbols):
-                            break
+                    try:
+                        async for g in streamer.listen(Greeks):
+                            raw_results[g.event_symbol] = g
+                            if len(raw_results) >= len(streamer_symbols):
+                                break
+                    except asyncio.CancelledError:
+                        # Task was cancelled, clean exit
+                        pass
 
                 try:
-                    await asyncio.wait_for(collector(), timeout=timeout_s)
+                    collector_task = asyncio.create_task(collector())
+                    await asyncio.wait_for(collector_task, timeout=timeout_s)
                 except asyncio.TimeoutError:
                     # partial results are okay; caller will decide how to handle
-                    pass
+                    if collector_task and not collector_task.done():
+                        collector_task.cancel()
+                        try:
+                            await collector_task
+                        except asyncio.CancelledError:
+                            pass
     except Exception as e:
         # Handle streamer connection failures (timeout, network errors, etc.)
         logger.warning(f"Greeks streamer connection failed: {e}. Continuing without Greeks data for this batch.")
+        # Clean up any pending tasks
+        if collector_task and not collector_task.done():
+            collector_task.cancel()
+            try:
+                await collector_task
+            except asyncio.CancelledError:
+                pass
         return {}  # Return empty dict, caller will handle missing data
 
     # Extract (iv, delta) tuples from Greeks objects

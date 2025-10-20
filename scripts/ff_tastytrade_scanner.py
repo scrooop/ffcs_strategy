@@ -1069,7 +1069,8 @@ async def scan(session: Session, tickers: List[str], pairs: List[Tuple[int, int]
                skip_earnings: bool = True, options_volume_threshold: Optional[float] = None,
                skip_liquidity_check: bool = False, show_earnings_conflicts: bool = False,
                show_all_scans: bool = False, structure: str = "both",
-               delta_tolerance: float = 0.05, earnings_data: Optional[Dict[str, dict]] = None) -> Tuple[List[dict], Dict[str, int], int, int]:
+               delta_tolerance: float = 0.05, earnings_data: Optional[Dict[str, dict]] = None,
+               verbose: bool = False) -> Tuple[List[dict], Dict[str, int], int, int]:
     """
     Main scanner function: Find calendar spread opportunities with high forward factors.
 
@@ -1102,6 +1103,7 @@ async def scan(session: Session, tickers: List[str], pairs: List[Tuple[int, int]
         structure: Calendar type: "atm-call", "double", or "both" (default "both")
         delta_tolerance: Max delta deviation for double calendars (default 0.05 = ±5Δ)
         earnings_data: Optional earnings data dict from EarningsCache (default None)
+        verbose: If True, log ALL symbols (pass, filter, skip, error) for verbose mode (default False)
 
     Returns:
         Tuple of (rows, skip_stats, scanned, passed):
@@ -1184,7 +1186,10 @@ async def scan(session: Session, tickers: List[str], pairs: List[Tuple[int, int]
             if spot is None:
                 skip_stats[SKIP_NO_QUOTE] += 1
                 market_logger.debug(f"{sym}: Skipping - {SKIP_NO_QUOTE}")
-                market_logger.warning(f"{sym}: No quote available, skipping")
+                if verbose:
+                    market_logger.info(f"{sym}: SKIP - No quote available (futures)")
+                else:
+                    market_logger.warning(f"{sym}: No quote available, skipping")
                 continue
         else:
             # For equity, use standard equity market data
@@ -1193,13 +1198,19 @@ async def scan(session: Session, tickers: List[str], pairs: List[Tuple[int, int]
                 if md is None or md.last is None:
                     skip_stats[SKIP_NO_QUOTE] += 1
                     market_logger.debug(f"{sym}: Skipping - {SKIP_NO_QUOTE}")
-                    market_logger.warning(f"{sym}: No quote available, skipping")
+                    if verbose:
+                        market_logger.info(f"{sym}: SKIP - No quote available")
+                    else:
+                        market_logger.warning(f"{sym}: No quote available, skipping")
                     continue
                 spot = float(md.last) if md.last is not None else float(md.mark)
             except Exception as e:
                 skip_stats[SKIP_NO_QUOTE] += 1
                 market_logger.debug(f"{sym}: Skipping - {SKIP_NO_QUOTE} (error: {e})")
-                market_logger.warning(f"{sym}: Could not get market data - {e}, skipping")
+                if verbose:
+                    market_logger.info(f"{sym}: ERROR - Market data fetch failed ({e})")
+                else:
+                    market_logger.warning(f"{sym}: Could not get market data - {e}, skipping")
                 continue
 
         # 2) Extract earnings data and liquidity rating for this symbol
@@ -1241,7 +1252,10 @@ async def scan(session: Session, tickers: List[str], pairs: List[Tuple[int, int]
             if not futures_chain or not futures_chain.option_chains:
                 skip_stats[SKIP_NO_CHAIN] += 1
                 market_logger.debug(f"{sym}: Skipping - {SKIP_NO_CHAIN}")
-                market_logger.warning(f"{sym}: No option chain, skipping")
+                if verbose:
+                    market_logger.info(f"{sym}: SKIP - No option chain available (futures)")
+                else:
+                    market_logger.warning(f"{sym}: No option chain, skipping")
                 continue
             chain = futures_chain.option_chains[0]  # Get the first option chain
         else:
@@ -1250,7 +1264,10 @@ async def scan(session: Session, tickers: List[str], pairs: List[Tuple[int, int]
             if not chain_list:
                 skip_stats[SKIP_NO_CHAIN] += 1
                 market_logger.debug(f"{sym}: Skipping - {SKIP_NO_CHAIN}")
-                market_logger.warning(f"{sym}: No option chain, skipping")
+                if verbose:
+                    market_logger.info(f"{sym}: SKIP - No option chain available")
+                else:
+                    market_logger.warning(f"{sym}: No option chain, skipping")
                 continue
             chain = chain_list[0]  # API returns a list; take first element
 
@@ -1268,7 +1285,10 @@ async def scan(session: Session, tickers: List[str], pairs: List[Tuple[int, int]
             if not passes:
                 skip_stats[SKIP_EARNINGS_CONFLICT] += 1
                 quality_logger.debug(f"{sym}: Skipping - {SKIP_EARNINGS_CONFLICT} - {reason}")
-                quality_logger.info(f"{sym}: FILTER - {reason}")
+                if verbose:
+                    quality_logger.info(f"{sym}: FILTER - Earnings conflict ({reason})")
+                else:
+                    quality_logger.info(f"{sym}: FILTER - {reason}")
                 if show_earnings_conflicts:
                     # Note: We'd compute FF here if we had the data, but skipping for simplicity
                     filtered_rows.append({"symbol": sym, "reason": reason})
@@ -1281,14 +1301,20 @@ async def scan(session: Session, tickers: List[str], pairs: List[Tuple[int, int]
                 passes, reason = check_option_volume(sym, option_volume, options_volume_threshold)
                 if not passes:
                     skip_stats[SKIP_VOLUME_TOO_LOW] += 1
-                    quality_logger.info(f"{sym}: FILTER - {reason}")
+                    if verbose:
+                        quality_logger.info(f"{sym}: FILTER - {reason}")
+                    else:
+                        quality_logger.info(f"{sym}: FILTER - {reason}")
                     continue
             else:
                 # Mode 2: Use liquidity_rating from Market Metrics (24/7 available)
                 passes, reason = check_liquidity_rating(sym, market_metrics, min_rating=3)
                 if not passes:
                     skip_stats[SKIP_VOLUME_TOO_LOW] += 1  # Reuse same skip reason for both modes
-                    quality_logger.info(f"{sym}: FILTER - {reason}")
+                    if verbose:
+                        quality_logger.info(f"{sym}: FILTER - {reason}")
+                    else:
+                        quality_logger.info(f"{sym}: FILTER - {reason}")
                     continue
 
         # 4) Branch based on calendar structure mode
@@ -1333,7 +1359,10 @@ async def scan(session: Session, tickers: List[str], pairs: List[Tuple[int, int]
                 }
 
             if not delta_choices:
-                market_logger.warning(f"{sym}: No expirations matched tolerance, skipping")
+                if verbose:
+                    market_logger.info(f"{sym}: SKIP - No expirations matched tolerance")
+                else:
+                    market_logger.warning(f"{sym}: No expirations matched tolerance, skipping")
                 continue
 
             # Build rows for double calendar pairs
@@ -1475,6 +1504,11 @@ async def scan(session: Session, tickers: List[str], pairs: List[Tuple[int, int]
                 # Filter on min_ff (both wings must independently meet threshold)
                 if min_ff_double >= min_ff or show_all_scans:
                     passed += 1
+
+                    # Log PASS in verbose mode
+                    if verbose:
+                        greeks_logger.info(f"{sym}: PASS - Double calendar (min_ff={min_ff_double:.3f}, {front}-{back} DTE)")
+
                     rows.append({
                         # Metadata (4)
                         "timestamp": timestamp,
@@ -1516,6 +1550,10 @@ async def scan(session: Session, tickers: List[str], pairs: List[Tuple[int, int]
                         "earnings_source": earnings_source,
                         "skip_reason": ""
                     })
+                elif verbose:
+                    # Log below-threshold symbols in verbose mode
+                    skip_stats[SKIP_BELOW_FF_THRESHOLD] += 1
+                    greeks_logger.info(f"{sym}: FILTER - Below FF threshold (min_ff={min_ff_double:.3f} < {min_ff:.2f}, {front}-{back} DTE)")
 
         if scan_atm:
             # ========== ATM CALENDAR MODE (delta-based strike selection) ==========
@@ -1554,7 +1592,10 @@ async def scan(session: Session, tickers: List[str], pairs: List[Tuple[int, int]
                 streamer_syms.extend([call_sym, put_sym])
 
             if not choices:
-                market_logger.warning(f"{sym}: No expirations matched tolerance, skipping")
+                if verbose:
+                    market_logger.info(f"{sym}: SKIP - No expirations matched tolerance (ATM)")
+                else:
+                    market_logger.warning(f"{sym}: No expirations matched tolerance, skipping")
                 continue
 
             # 4) Use Greeks IV as primary (strike-level), fallback to ex-earn IV if missing
@@ -1667,6 +1708,11 @@ async def scan(session: Session, tickers: List[str], pairs: List[Tuple[int, int]
                 # Include result if: (1) meets FF threshold, OR (2) show_all_scans is enabled
                 if atm_ff >= min_ff or show_all_scans:
                     passed += 1
+
+                    # Log PASS in verbose mode
+                    if verbose:
+                        greeks_logger.info(f"{sym}: PASS - ATM calendar (ff={atm_ff:.3f}, {front}-{back} DTE)")
+
                     rows.append({
                         # Metadata (4)
                         "timestamp": timestamp,
@@ -1708,6 +1754,10 @@ async def scan(session: Session, tickers: List[str], pairs: List[Tuple[int, int]
                         "earnings_source": earnings_source,
                         "skip_reason": ""
                     })
+                elif verbose:
+                    # Log below-threshold symbols in verbose mode
+                    skip_stats[SKIP_BELOW_FF_THRESHOLD] += 1
+                    greeks_logger.info(f"{sym}: FILTER - Below FF threshold (ff={atm_ff:.3f} < {min_ff:.2f}, {front}-{back} DTE)")
 
     # Sort results:
     # - Double calendars: sort by min_ff descending (primary), combined_ff (secondary), symbol (tertiary)
@@ -1838,13 +1888,31 @@ Examples:
     # Debug/logging options
     ap.add_argument("--debug", action="store_true",
                     help="Enable debug logging from tastytrade SDK and httpx library.")
+    ap.add_argument("--quiet", action="store_true",
+                    help="Quiet mode: suppress per-symbol output, show only summary and errors.")
+    ap.add_argument("--verbose", action="store_true",
+                    help="Verbose mode: show ALL symbols (pass, filter, skip, error).")
 
     args = ap.parse_args()
     tickers = read_list_arg(args.tickers)
     pairs = parse_pairs(read_list_arg(args.pairs))
 
+    # Handle flag conflicts (Issue #39)
+    if args.quiet and args.verbose:
+        print("ERROR: Cannot use --quiet and --verbose together. Choose one.", file=sys.stderr)
+        sys.exit(1)
+
+    # Determine logging mode (Issue #38 + #39)
+    if args.debug:
+        mode = "debug"
+    elif args.quiet:
+        mode = "quiet"
+    elif args.verbose:
+        mode = "verbose"
+    else:
+        mode = "normal"
+
     # Setup hierarchical logging system (Issue #38)
-    mode = "debug" if args.debug else "normal"
     scanner_logger = setup_logging(mode)
 
     # Validate flag values
@@ -1935,7 +2003,8 @@ Examples:
         show_all_scans=args.show_all_scans,
         structure=args.structure,
         delta_tolerance=args.delta_tolerance,
-        earnings_data=earnings_data
+        earnings_data=earnings_data,
+        verbose=args.verbose
     ))
 
     # v3.0 CSV schema (32 columns) - BREAKING CHANGE

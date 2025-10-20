@@ -1,8 +1,9 @@
 ---
 name: output-csv-terminal-flags
-status: backlog
+status: in-progress
 created: 2025-10-20T17:46:00Z
-progress: 0%
+updated: 2025-10-20T20:03:38Z
+progress: 60%
 prd: .claude/prds/output-csv-terminal-flags.md
 github: https://github.com/scrooop/ffcs_strategy/issues/34
 ---

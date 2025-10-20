@@ -1104,7 +1104,10 @@ async def scan(session: Session, tickers: List[str], pairs: List[Tuple[int, int]
                 ff_call = (front_call.iv - fwd_call) / fwd_call
                 ff_put = (front_put.iv - fwd_put) / fwd_put
 
-                # Calculate combined FF (average of both legs)
+                # Calculate min FF (both wings must independently meet threshold)
+                min_ff_double = min(ff_call, ff_put)
+
+                # Calculate combined FF (average of both legs - kept for reference)
                 combined_ff = (ff_call + ff_put) / 2.0
 
                 # Use Greeks IV as primary (strike-level precision, preserves skew)
@@ -1177,10 +1180,15 @@ async def scan(session: Session, tickers: List[str], pairs: List[Tuple[int, int]
 
                 ff_call = (front_call_iv - fwd_call) / fwd_call
                 ff_put = (front_put_iv - fwd_put) / fwd_put
+
+                # Calculate min FF (both wings must independently meet threshold)
+                min_ff_double = min(ff_call, ff_put)
+
+                # Calculate combined FF (average of both legs - kept for reference)
                 combined_ff = (ff_call + ff_put) / 2.0
 
-                # Filter on combined_ff
-                if combined_ff >= min_ff or show_all_scans:
+                # Filter on min_ff (both wings must independently meet threshold)
+                if min_ff_double >= min_ff or show_all_scans:
                     passed += 1
                     rows.append({
                         "timestamp": timestamp,
@@ -1189,6 +1197,7 @@ async def scan(session: Session, tickers: List[str], pairs: List[Tuple[int, int]
                         "call_ff": round(ff_call, 6),
                         "put_ff": round(ff_put, 6),
                         "combined_ff": round(combined_ff, 6),
+                        "min_ff": round(min_ff_double, 6),
                         "spot_price": f"{spot:.2f}",
                         "front_dte": front_choice["dte"],
                         "back_dte": back_choice["dte"],
@@ -1366,6 +1375,7 @@ async def scan(session: Session, tickers: List[str], pairs: List[Tuple[int, int]
                         "call_ff": round(call_ff, 6),
                         "put_ff": round(put_ff, 6),
                         "combined_ff": round(combined_ff, 6),
+                        "min_ff": "",  # Not applicable for ATM structure
                         "spot_price": f"{spot:.2f}",
                         "front_dte": front_choice.dte,
                         "back_dte": back_choice.dte,
@@ -1393,8 +1403,21 @@ async def scan(session: Session, tickers: List[str], pairs: List[Tuple[int, int]
                         "skip_reason": ""
                     })
 
-    # Sort by combined_ff descending (highest FF first), then by symbol ascending
-    rows.sort(key=lambda r: (-r["combined_ff"], r["symbol"]))
+    # Sort results:
+    # - Double calendars: sort by min_ff descending (primary), combined_ff (secondary), symbol (tertiary)
+    # - ATM calendars: sort by combined_ff descending (primary), symbol (secondary)
+    # Separate the two structures for appropriate sorting
+    doubles = [r for r in rows if r["structure"] == "double"]
+    atm_rows = [r for r in rows if r["structure"] == "atm-call"]
+
+    # Sort doubles by min_ff (highest first), then combined_ff, then symbol
+    doubles.sort(key=lambda r: (-r["min_ff"], -r["combined_ff"], r["symbol"]))
+
+    # Sort ATM by combined_ff (highest first), then symbol
+    atm_rows.sort(key=lambda r: (-r["combined_ff"], r["symbol"]))
+
+    # Combine back: doubles first (higher priority), then ATM
+    rows = doubles + atm_rows
 
     # Return rows and statistics
     return rows, skip_stats, scanned, passed
@@ -1607,10 +1630,10 @@ Examples:
         earnings_data=earnings_data
     ))
 
-    # Unified 31-column CSV schema
+    # Unified 32-column CSV schema
     cols = [
         "timestamp", "symbol", "structure",
-        "call_ff", "put_ff", "combined_ff",
+        "call_ff", "put_ff", "combined_ff", "min_ff",
         "spot_price",
         "front_dte", "back_dte", "front_expiry", "back_expiry",
         "atm_strike", "call_strike", "put_strike", "call_delta", "put_delta",

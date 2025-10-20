@@ -68,6 +68,123 @@ ATM_DELTA_TARGET = 0.50
 # If no strikes within ±0.10Δ of target, fallback to nearest-spot logic
 ATM_DELTA_TOLERANCE = 0.10
 
+# ---------- Logging Setup ----------
+
+class SymbolFormatter(logging.Formatter):
+    """
+    Custom formatter for symbol-based log messages.
+
+    Formats messages as: [SYMBOL] STATUS: details
+
+    Expected message format: "SYMBOL: message text"
+    If no colon found, returns message as-is.
+
+    Status mapping:
+        DEBUG   -> DEBUG
+        INFO    -> INFO
+        WARNING -> WARN
+        ERROR   -> ERROR
+
+    Example:
+        Input:  logger.info("SPY: Forward factor 0.285")
+        Output: [SPY   ] INFO : Forward factor 0.285
+    """
+
+    def format(self, record):
+        msg = str(record.msg) % record.args if record.args else str(record.msg)
+
+        # Extract symbol from message (format: "SYMBOL: message")
+        if ':' in msg:
+            parts = msg.split(':', 1)
+            symbol = parts[0].strip()
+            message = parts[1].strip()
+
+            # Map log level to status keyword
+            status_map = {
+                'DEBUG': 'DEBUG',
+                'INFO': 'INFO',
+                'WARNING': 'WARN',
+                'ERROR': 'ERROR'
+            }
+            status = status_map.get(record.levelname, record.levelname[:5].upper())
+
+            # Format: [SYMBOL] STATUS: message
+            # Pad symbol to 6 chars, status to 5 chars for alignment
+            return f"[{symbol:6}] {status:5}: {message}"
+        else:
+            # No symbol prefix, return as-is
+            return msg
+
+
+def setup_logging(mode: str) -> logging.Logger:
+    """
+    Configure hierarchical logging system for the scanner.
+
+    Creates a logger hierarchy:
+        - scanner (root)
+        - scanner.earnings
+        - scanner.market_data
+        - scanner.greeks
+        - scanner.quality
+
+    Args:
+        mode: Logging mode, one of:
+            - "quiet": Only ERROR messages
+            - "normal": INFO and above (default user mode)
+            - "verbose": INFO and above (same as normal, reserved for future use)
+            - "debug": All messages including DEBUG, with timestamps
+
+    Returns:
+        Root scanner logger instance
+
+    Modes:
+        quiet:  Minimal output, only errors
+        normal: Clean [SYMBOL] STATUS format, INFO/WARN/ERROR
+        debug:  Full timestamps + logger names, all DEBUG messages
+
+    Side effects:
+        - Clears existing handlers on scanner logger
+        - Suppresses yfinance logger to ERROR level (no HTTP 404 spam)
+        - Suppresses tastytrade, httpx, earnings_cache to WARNING
+    """
+    # Create root scanner logger
+    scanner_logger = logging.getLogger("scanner")
+    scanner_logger.handlers = []  # Clear existing handlers
+    scanner_logger.propagate = False  # Don't propagate to root logger
+
+    # Set level based on mode
+    if mode == "quiet":
+        scanner_logger.setLevel(logging.ERROR)
+    elif mode == "debug":
+        scanner_logger.setLevel(logging.DEBUG)
+    else:  # normal, verbose
+        scanner_logger.setLevel(logging.INFO)
+
+    # Create console handler
+    console = logging.StreamHandler(sys.stderr)
+
+    # Choose formatter based on mode
+    if mode == "debug":
+        # Debug mode: timestamps and logger names for troubleshooting
+        formatter = logging.Formatter(
+            '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+        )
+    else:
+        # Normal/verbose/quiet: clean symbol-based format
+        formatter = SymbolFormatter()
+
+    console.setFormatter(formatter)
+    scanner_logger.addHandler(console)
+
+    # Suppress noisy third-party loggers
+    logging.getLogger("yfinance").setLevel(logging.ERROR)  # No HTTP 404 spam
+    logging.getLogger("tastytrade").setLevel(logging.WARNING)
+    logging.getLogger("httpx").setLevel(logging.WARNING)
+    logging.getLogger("earnings_cache").setLevel(logging.WARNING)
+
+    return scanner_logger
+
+
 # ---------- Logger ----------
 logger = logging.getLogger(__name__)
 
@@ -213,10 +330,11 @@ def get_futures_spot_price(symbol: str) -> Optional[float]:
         >>> print(f'/ES spot: {price}')
         /ES spot: 5921.50
     """
+    market_logger = logging.getLogger("scanner.market_data")
     try:
         yahoo_symbol = tastytrade_to_yahoo_futures(symbol)
         if not yahoo_symbol:
-            print(f"[WARN] Unknown futures symbol {symbol}, no Yahoo Finance mapping", file=sys.stderr)
+            market_logger.warning(f"{symbol}: Unknown futures symbol, no Yahoo Finance mapping")
             return None
 
         # Fetch current price from Yahoo Finance
@@ -232,11 +350,11 @@ def get_futures_spot_price(symbol: str) -> Optional[float]:
         if not hist.empty:
             return float(hist['Close'].iloc[-1])
 
-        print(f"[WARN] No price data available for {yahoo_symbol}", file=sys.stderr)
+        market_logger.warning(f"{yahoo_symbol}: No price data available")
         return None
 
     except Exception as e:
-        print(f"[WARN] Could not get futures spot price for {symbol}: {e}", file=sys.stderr)
+        market_logger.warning(f"{symbol}: Could not get futures spot price - {e}")
         return None
 
 @dataclass(frozen=True)
@@ -705,6 +823,7 @@ def fetch_market_metrics(session: Session, symbols: List[str]) -> Dict[str, any]
         >>> metrics['SPY'].earnings.expected_report_date
         date(2025, 10, 25)
     """
+    market_logger = logging.getLogger("scanner.market_data")
     try:
         metrics = get_market_metrics(session, symbols)
         if not metrics:
@@ -712,7 +831,7 @@ def fetch_market_metrics(session: Session, symbols: List[str]) -> Dict[str, any]
         # Convert list to dict for easy lookup
         return {m.symbol: m for m in metrics if m.symbol}
     except Exception as e:
-        print(f"[ERROR] Market metrics fetch failed: {e}", file=sys.stderr)
+        market_logger.error(f"ALL_SYMBOLS: Market metrics fetch failed - {e}")
         return {}
 
 def check_earnings_conflict(
@@ -751,9 +870,11 @@ def check_earnings_conflict(
         >>> check_earnings_conflict('AAPL', metrics, date(2025, 11, 15), date(2025, 10, 20))
         (True, None)
     """
+    earnings_logger = logging.getLogger("scanner.earnings")
+
     if symbol not in metrics:
         # No metrics data - log warning but allow through
-        print(f"[WARN] {symbol}: Market metrics unavailable, skipping earnings check", file=sys.stderr)
+        earnings_logger.warning(f"{symbol}: Market metrics unavailable, skipping earnings check")
         return (True, None)
 
     metric_info = metrics[symbol]
@@ -761,13 +882,13 @@ def check_earnings_conflict(
     # Check if earnings attribute exists
     earnings = getattr(metric_info, 'earnings', None)
     if earnings is None:
-        print(f"[WARN] {symbol}: Earnings data unavailable, skipping earnings check", file=sys.stderr)
+        earnings_logger.warning(f"{symbol}: Earnings data unavailable, skipping earnings check")
         return (True, None)
 
     # Get expected_report_date from earnings object
     earnings_date = getattr(earnings, 'expected_report_date', None)
     if earnings_date is None:
-        print(f"[WARN] {symbol}: Earnings date unavailable, skipping earnings check", file=sys.stderr)
+        earnings_logger.warning(f"{symbol}: Earnings date unavailable, skipping earnings check")
         return (True, None)
 
     # Check if earnings falls in the window
@@ -810,8 +931,10 @@ def check_liquidity_rating(
         >>> check_liquidity_rating('ILLIQUID', metrics, min_rating=3)
         (False, 'Liquidity rating 2 < 3')
     """
+    quality_logger = logging.getLogger("scanner.quality")
+
     if symbol not in metrics:
-        print(f"[WARN] {symbol}: Market metrics unavailable, skipping liquidity check", file=sys.stderr)
+        quality_logger.warning(f"{symbol}: Market metrics unavailable, skipping liquidity check")
         return (True, None)
 
     metric_info = metrics[symbol]
@@ -821,18 +944,18 @@ def check_liquidity_rating(
 
     # Handle futures symbols - allow through if rating field is missing
     if is_futures_symbol(symbol) and rating is None:
-        logger.debug(f"{symbol}: Futures symbol, liquidity check skipped (field missing)")
+        quality_logger.debug(f"{symbol}: Futures symbol, liquidity check skipped (field missing)")
         return (True, None)
 
     if rating is None:
-        print(f"[WARN] {symbol}: Liquidity rating unavailable, skipping liquidity check", file=sys.stderr)
+        quality_logger.warning(f"{symbol}: Liquidity rating unavailable, skipping liquidity check")
         return (True, None)
 
     # Convert to int if needed
     try:
         rating_int = int(rating)
     except (ValueError, TypeError):
-        print(f"[WARN] {symbol}: Invalid liquidity rating format, skipping liquidity check", file=sys.stderr)
+        quality_logger.warning(f"{symbol}: Invalid liquidity rating format, skipping liquidity check")
         return (True, None)
 
     if rating_int < min_rating:
@@ -874,14 +997,16 @@ def check_option_volume(
         >>> check_option_volume('ILLIQUID', 5000, min_volume=10000)
         (False, 'Option volume 5000 < 10000')
     """
+    quality_logger = logging.getLogger("scanner.quality")
+
     # Handle missing volume data gracefully
     if option_volume is None:
-        print(f"[WARN] {symbol}: Option volume unavailable (may need market hours), skipping volume check", file=sys.stderr)
+        quality_logger.warning(f"{symbol}: Option volume unavailable (may need market hours), skipping volume check")
         return (True, None)
 
     # Handle futures symbols - allow through if volume is 0 or missing
     if is_futures_symbol(symbol) and option_volume == 0:
-        logger.debug(f"{symbol}: Futures symbol with zero volume, check skipped")
+        quality_logger.debug(f"{symbol}: Futures symbol with zero volume, check skipped")
         return (True, None)
 
     if option_volume < min_volume:
@@ -1047,14 +1172,19 @@ async def scan(session: Session, tickers: List[str], pairs: List[Tuple[int, int]
         if idx > 0:
             await asyncio.sleep(0.5)  # 500ms delay between symbols
 
+        # Initialize sub-loggers for this symbol
+        market_logger = logging.getLogger("scanner.market_data")
+        greeks_logger = logging.getLogger("scanner.greeks")
+        quality_logger = logging.getLogger("scanner.quality")
+
         # 1) Underlying spot - handle futures vs equity
         if is_futures_symbol(sym):
             # For futures, get spot from Yahoo Finance (tastytrade doesn't provide futures prices)
             spot = get_futures_spot_price(sym)
             if spot is None:
                 skip_stats[SKIP_NO_QUOTE] += 1
-                logger.debug(f"Skipping {sym}: {SKIP_NO_QUOTE}")
-                print(f"[WARN] No quote available for {sym}, skipping.", file=sys.stderr)
+                market_logger.debug(f"{sym}: Skipping - {SKIP_NO_QUOTE}")
+                market_logger.warning(f"{sym}: No quote available, skipping")
                 continue
         else:
             # For equity, use standard equity market data
@@ -1062,14 +1192,14 @@ async def scan(session: Session, tickers: List[str], pairs: List[Tuple[int, int]
                 md = get_market_data(session, sym, InstrumentType.EQUITY)
                 if md is None or md.last is None:
                     skip_stats[SKIP_NO_QUOTE] += 1
-                    logger.debug(f"Skipping {sym}: {SKIP_NO_QUOTE}")
-                    print(f"[WARN] No quote for {sym}, skipping.", file=sys.stderr)
+                    market_logger.debug(f"{sym}: Skipping - {SKIP_NO_QUOTE}")
+                    market_logger.warning(f"{sym}: No quote available, skipping")
                     continue
                 spot = float(md.last) if md.last is not None else float(md.mark)
             except Exception as e:
                 skip_stats[SKIP_NO_QUOTE] += 1
-                logger.debug(f"Skipping {sym}: {SKIP_NO_QUOTE} (error: {e})")
-                print(f"[WARN] Could not get market data for {sym}: {e}, skipping.", file=sys.stderr)
+                market_logger.debug(f"{sym}: Skipping - {SKIP_NO_QUOTE} (error: {e})")
+                market_logger.warning(f"{sym}: Could not get market data - {e}, skipping")
                 continue
 
         # 2) Extract earnings data and liquidity rating for this symbol
@@ -1097,11 +1227,11 @@ async def scan(session: Session, tickers: List[str], pairs: List[Tuple[int, int]
                 underlying_event = await snapshot_underlying(session, sym, timeout_s=timeout_s)
                 if underlying_event is not None:
                     option_volume = underlying_event.option_volume
-                    logger.info(f"{sym}: Option volume today: {option_volume}")
+                    market_logger.info(f"{sym}: Option volume today: {option_volume}")
                 else:
-                    logger.warning(f"{sym}: No Underlying event received")
+                    market_logger.warning(f"{sym}: No Underlying event received")
             except Exception as e:
-                logger.warning(f"{sym}: Failed to fetch Underlying event: {e}")
+                market_logger.warning(f"{sym}: Failed to fetch Underlying event: {e}")
                 option_volume = None
 
         # 3) Chain (nested) - handle futures vs equity
@@ -1110,8 +1240,8 @@ async def scan(session: Session, tickers: List[str], pairs: List[Tuple[int, int]
             futures_chain = NestedFutureOptionChain.get(session, sym)
             if not futures_chain or not futures_chain.option_chains:
                 skip_stats[SKIP_NO_CHAIN] += 1
-                logger.debug(f"Skipping {sym}: {SKIP_NO_CHAIN}")
-                print(f"[WARN] No option chain for {sym}, skipping.", file=sys.stderr)
+                market_logger.debug(f"{sym}: Skipping - {SKIP_NO_CHAIN}")
+                market_logger.warning(f"{sym}: No option chain, skipping")
                 continue
             chain = futures_chain.option_chains[0]  # Get the first option chain
         else:
@@ -1119,8 +1249,8 @@ async def scan(session: Session, tickers: List[str], pairs: List[Tuple[int, int]
             chain_list = NestedOptionChain.get(session, sym)
             if not chain_list:
                 skip_stats[SKIP_NO_CHAIN] += 1
-                logger.debug(f"Skipping {sym}: {SKIP_NO_CHAIN}")
-                print(f"[WARN] No option chain for {sym}, skipping.", file=sys.stderr)
+                market_logger.debug(f"{sym}: Skipping - {SKIP_NO_CHAIN}")
+                market_logger.warning(f"{sym}: No option chain, skipping")
                 continue
             chain = chain_list[0]  # API returns a list; take first element
 
@@ -1137,8 +1267,8 @@ async def scan(session: Session, tickers: List[str], pairs: List[Tuple[int, int]
             passes, reason = check_earnings_conflict(sym, market_metrics, max_back_exp, today)
             if not passes:
                 skip_stats[SKIP_EARNINGS_CONFLICT] += 1
-                logger.debug(f"Skipping {sym}: {SKIP_EARNINGS_CONFLICT} - {reason}")
-                print(f"[FILTERED] {sym}: {reason}", file=sys.stderr)
+                quality_logger.debug(f"{sym}: Skipping - {SKIP_EARNINGS_CONFLICT} - {reason}")
+                quality_logger.info(f"{sym}: FILTER - {reason}")
                 if show_earnings_conflicts:
                     # Note: We'd compute FF here if we had the data, but skipping for simplicity
                     filtered_rows.append({"symbol": sym, "reason": reason})
@@ -1151,16 +1281,14 @@ async def scan(session: Session, tickers: List[str], pairs: List[Tuple[int, int]
                 passes, reason = check_option_volume(sym, option_volume, options_volume_threshold)
                 if not passes:
                     skip_stats[SKIP_VOLUME_TOO_LOW] += 1
-                    logger.info(f"{sym}: {reason}")
-                    print(f"[FILTERED] {sym}: {reason}", file=sys.stderr)
+                    quality_logger.info(f"{sym}: FILTER - {reason}")
                     continue
             else:
                 # Mode 2: Use liquidity_rating from Market Metrics (24/7 available)
                 passes, reason = check_liquidity_rating(sym, market_metrics, min_rating=3)
                 if not passes:
                     skip_stats[SKIP_VOLUME_TOO_LOW] += 1  # Reuse same skip reason for both modes
-                    logger.info(f"{sym}: {reason}")
-                    print(f"[FILTERED] {sym}: {reason}", file=sys.stderr)
+                    quality_logger.info(f"{sym}: FILTER - {reason}")
                     continue
 
         # 4) Branch based on calendar structure mode
@@ -1193,7 +1321,7 @@ async def scan(session: Session, tickers: List[str], pairs: List[Tuple[int, int]
                         timeout_s=timeout_s
                     )
                 except Exception as e:
-                    logger.warning(f"Greeks streamer connection failed for {sym} {exp_date}: {e}. Skipping this expiration.")
+                    greeks_logger.warning(f"{sym} {exp_date}: Greeks streamer connection failed - {e}. Skipping expiration")
                     delta_strikes = {"call_35delta": None, "put_35delta": None}  # Both legs missing
 
                 # Store with expiration info
@@ -1205,7 +1333,7 @@ async def scan(session: Session, tickers: List[str], pairs: List[Tuple[int, int]
                 }
 
             if not delta_choices:
-                print(f"[WARN] No expirations matched tolerance for {sym}", file=sys.stderr)
+                market_logger.warning(f"{sym}: No expirations matched tolerance, skipping")
                 continue
 
             # Build rows for double calendar pairs
@@ -1229,7 +1357,7 @@ async def scan(session: Session, tickers: List[str], pairs: List[Tuple[int, int]
                 # Skip if we don't have BOTH call and put calendars
                 if not (has_call_calendar and has_put_calendar):
                     skip_stats[SKIP_BOTH_LEGS_REQUIRED] += 1
-                    logger.debug(f"Skipping {sym} double {front}-{back}: {SKIP_BOTH_LEGS_REQUIRED}")
+                    greeks_logger.debug(f"{sym} double {front}-{back}: Skipping - {SKIP_BOTH_LEGS_REQUIRED}")
                     continue
 
                 # Validate inputs before calculating forward IV
@@ -1238,7 +1366,7 @@ async def scan(session: Session, tickers: List[str], pairs: List[Tuple[int, int]
                 )
                 if call_skip_reason:
                     skip_stats[SKIP_NONPOSITIVE_FWD_VAR] += 1
-                    logger.debug(f"Skipping {sym} double {front}-{back} call: {call_skip_reason}")
+                    greeks_logger.debug(f"{sym} double {front}-{back} call: Skipping - {call_skip_reason}")
                     continue
 
                 put_skip_reason = validate_ff_inputs(
@@ -1246,7 +1374,7 @@ async def scan(session: Session, tickers: List[str], pairs: List[Tuple[int, int]
                 )
                 if put_skip_reason:
                     skip_stats[SKIP_NONPOSITIVE_FWD_VAR] += 1
-                    logger.debug(f"Skipping {sym} double {front}-{back} put: {put_skip_reason}")
+                    greeks_logger.debug(f"{sym} double {front}-{back} put: Skipping - {put_skip_reason}")
                     continue
 
                 # Calculate FFs for both legs
@@ -1255,7 +1383,7 @@ async def scan(session: Session, tickers: List[str], pairs: List[Tuple[int, int]
 
                 if fwd_call is None or fwd_call <= 0 or fwd_put is None or fwd_put <= 0:
                     skip_stats[SKIP_NONPOSITIVE_FWD_VAR] += 1
-                    logger.debug(f"Skipping {sym} double {front}-{back}: negative forward IV")
+                    greeks_logger.debug(f"{sym} double {front}-{back}: Skipping - negative forward IV")
                     continue
 
                 ff_call = (front_call.iv - fwd_call) / fwd_call
@@ -1282,48 +1410,48 @@ async def scan(session: Session, tickers: List[str], pairs: List[Tuple[int, int]
 
                 # Rare fallback: Use ex-earn IV if Greeks data missing for call leg
                 if front_call_iv is None or front_call_iv <= 0:
-                    logger.warning(f"{sym}: Greeks IV missing for call front leg, using ex-earn fallback")
+                    greeks_logger.warning(f"{sym}: Greeks IV missing for call front leg, using ex-earn fallback")
                     xearn_call_front = extract_xearn_iv(market_metrics, sym, front_choice["expiration"])
                     if xearn_call_front and xearn_call_front > 0:
                         front_call_iv = xearn_call_front
                         call_iv_source_front = "exearn_fallback"
                     else:
                         skip_stats[SKIP_MISSING_IV] += 1
-                        logger.debug(f"Skipping {sym} double {front}-{back}: missing call front IV")
+                        greeks_logger.debug(f"{sym} double {front}-{back}: Skipping - missing call front IV")
                         continue
 
                 if back_call_iv is None or back_call_iv <= 0:
-                    logger.warning(f"{sym}: Greeks IV missing for call back leg, using ex-earn fallback")
+                    greeks_logger.warning(f"{sym}: Greeks IV missing for call back leg, using ex-earn fallback")
                     xearn_call_back = extract_xearn_iv(market_metrics, sym, back_choice["expiration"])
                     if xearn_call_back and xearn_call_back > 0:
                         back_call_iv = xearn_call_back
                         call_iv_source_back = "exearn_fallback"
                     else:
                         skip_stats[SKIP_MISSING_IV] += 1
-                        logger.debug(f"Skipping {sym} double {front}-{back}: missing call back IV")
+                        greeks_logger.debug(f"{sym} double {front}-{back}: Skipping - missing call back IV")
                         continue
 
                 # Rare fallback: Use ex-earn IV if Greeks data missing for put leg
                 if front_put_iv is None or front_put_iv <= 0:
-                    logger.warning(f"{sym}: Greeks IV missing for put front leg, using ex-earn fallback")
+                    greeks_logger.warning(f"{sym}: Greeks IV missing for put front leg, using ex-earn fallback")
                     xearn_put_front = extract_xearn_iv(market_metrics, sym, front_choice["expiration"])
                     if xearn_put_front and xearn_put_front > 0:
                         front_put_iv = xearn_put_front
                         put_iv_source_front = "exearn_fallback"
                     else:
                         skip_stats[SKIP_MISSING_IV] += 1
-                        logger.debug(f"Skipping {sym} double {front}-{back}: missing put front IV")
+                        greeks_logger.debug(f"{sym} double {front}-{back}: Skipping - missing put front IV")
                         continue
 
                 if back_put_iv is None or back_put_iv <= 0:
-                    logger.warning(f"{sym}: Greeks IV missing for put back leg, using ex-earn fallback")
+                    greeks_logger.warning(f"{sym}: Greeks IV missing for put back leg, using ex-earn fallback")
                     xearn_put_back = extract_xearn_iv(market_metrics, sym, back_choice["expiration"])
                     if xearn_put_back and xearn_put_back > 0:
                         back_put_iv = xearn_put_back
                         put_iv_source_back = "exearn_fallback"
                     else:
                         skip_stats[SKIP_MISSING_IV] += 1
-                        logger.debug(f"Skipping {sym} double {front}-{back}: missing put back IV")
+                        greeks_logger.debug(f"{sym} double {front}-{back}: Skipping - missing put back IV")
                         continue
 
                 # Recalculate forward IV and FF with actual IVs used (Greeks or fallback)
@@ -1332,7 +1460,7 @@ async def scan(session: Session, tickers: List[str], pairs: List[Tuple[int, int]
 
                 if fwd_call is None or fwd_call <= 0 or fwd_put is None or fwd_put <= 0:
                     skip_stats[SKIP_NONPOSITIVE_FWD_VAR] += 1
-                    logger.debug(f"Skipping {sym} double {front}-{back}: negative forward IV after IV assignment")
+                    greeks_logger.debug(f"{sym} double {front}-{back}: Skipping - negative forward IV after IV assignment")
                     continue
 
                 ff_call = (front_call_iv - fwd_call) / fwd_call
@@ -1408,7 +1536,7 @@ async def scan(session: Session, tickers: List[str], pairs: List[Tuple[int, int]
                         session, exp_obj, spot, range_pct=0.25, timeout_s=timeout_s
                     )
                 except Exception as e:
-                    logger.warning(f"Greeks streamer connection failed for {sym} {exp_date}: {e}. Skipping this expiration.")
+                    greeks_logger.warning(f"{sym} {exp_date}: Greeks streamer connection failed - {e}. Skipping expiration")
                     greeks_map = {}  # Empty map - pick_atm_strike will fall back to nearest-spot
 
                 # Select ATM strike using delta-based selection (50Δ target)
@@ -1426,7 +1554,7 @@ async def scan(session: Session, tickers: List[str], pairs: List[Tuple[int, int]
                 streamer_syms.extend([call_sym, put_sym])
 
             if not choices:
-                print(f"[WARN] No expirations matched tolerance for {sym}", file=sys.stderr)
+                market_logger.warning(f"{sym}: No expirations matched tolerance, skipping")
                 continue
 
             # 4) Use Greeks IV as primary (strike-level), fallback to ex-earn IV if missing
@@ -1440,7 +1568,7 @@ async def scan(session: Session, tickers: List[str], pairs: List[Tuple[int, int]
             try:
                 greek_map = await snapshot_greeks(session, streamer_syms, timeout_s=timeout_s)
             except Exception as e:
-                logger.warning(f"Greeks streamer connection failed for {sym}: {e}. Falling back to X-earn IV.")
+                greeks_logger.warning(f"{sym}: Greeks streamer connection failed - {e}. Falling back to X-earn IV")
                 greek_map = {}  # Empty map - will fall back to X-earn IV
 
             for target, ch in choices.items():
@@ -1466,7 +1594,7 @@ async def scan(session: Session, tickers: List[str], pairs: List[Tuple[int, int]
             for target, ch in choices.items():
                 # Check if we need fallback for call IV
                 if target not in call_iv_by_target:
-                    logger.warning(f"{sym} {target}DTE: Greeks IV missing for call, using ex-earn fallback")
+                    greeks_logger.warning(f"{sym} {target}DTE: Greeks IV missing for call, using ex-earn fallback")
                     xearn_iv = extract_xearn_iv(market_metrics, sym, ch.expiration)
                     if xearn_iv is not None and xearn_iv > 0:
                         call_iv_by_target[target] = xearn_iv
@@ -1474,7 +1602,7 @@ async def scan(session: Session, tickers: List[str], pairs: List[Tuple[int, int]
 
                 # Check if we need fallback for put IV
                 if target not in put_iv_by_target:
-                    logger.warning(f"{sym} {target}DTE: Greeks IV missing for put, using ex-earn fallback")
+                    greeks_logger.warning(f"{sym} {target}DTE: Greeks IV missing for put, using ex-earn fallback")
                     xearn_iv = extract_xearn_iv(market_metrics, sym, ch.expiration)
                     if xearn_iv is not None and xearn_iv > 0:
                         put_iv_by_target[target] = xearn_iv
@@ -1503,13 +1631,13 @@ async def scan(session: Session, tickers: List[str], pairs: List[Tuple[int, int]
                 call_skip_reason = validate_ff_inputs(call_iv_f, call_iv_b, front_choice.dte, back_choice.dte)
                 if call_skip_reason:
                     skip_stats[SKIP_NONPOSITIVE_FWD_VAR] += 1
-                    logger.debug(f"Skipping {sym} ATM {front}-{back} call: {call_skip_reason}")
+                    greeks_logger.debug(f"{sym} ATM {front}-{back} call: Skipping - {call_skip_reason}")
                     continue
 
                 put_skip_reason = validate_ff_inputs(put_iv_f, put_iv_b, front_choice.dte, back_choice.dte)
                 if put_skip_reason:
                     skip_stats[SKIP_NONPOSITIVE_FWD_VAR] += 1
-                    logger.debug(f"Skipping {sym} ATM {front}-{back} put: {put_skip_reason}")
+                    greeks_logger.debug(f"{sym} ATM {front}-{back} put: Skipping - {put_skip_reason}")
                     continue
 
                 # Calculate single ATM FF using average of call and put IV
@@ -1520,7 +1648,7 @@ async def scan(session: Session, tickers: List[str], pairs: List[Tuple[int, int]
                 atm_fwd_iv = forward_iv(atm_iv_front, atm_iv_back, front_choice.dte, back_choice.dte)
                 if atm_fwd_iv is None or atm_fwd_iv <= 0:
                     skip_stats[SKIP_NONPOSITIVE_FWD_VAR] += 1
-                    logger.debug(f"Skipping {sym} ATM {front}-{back}: negative forward IV")
+                    greeks_logger.debug(f"{sym} ATM {front}-{back}: Skipping - negative forward IV")
                     continue
 
                 atm_ff = (atm_iv_front - atm_fwd_iv) / atm_fwd_iv
@@ -1715,33 +1843,19 @@ Examples:
     tickers = read_list_arg(args.tickers)
     pairs = parse_pairs(read_list_arg(args.pairs))
 
-    # Configure logging based on --debug flag
-    if args.debug:
-        # Debug mode: Show all DEBUG messages from all libraries
-        logging.basicConfig(
-            level=logging.DEBUG,
-            format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-        )
-    else:
-        # Normal mode: Silence third-party library debug/info logging
-        logging.basicConfig(
-            level=logging.WARNING,
-            format='%(message)s'
-        )
-        # Explicitly silence noisy libraries
-        logging.getLogger('tastytrade').setLevel(logging.WARNING)
-        logging.getLogger('httpx').setLevel(logging.WARNING)
-        logging.getLogger('earnings_cache').setLevel(logging.WARNING)
+    # Setup hierarchical logging system (Issue #38)
+    mode = "debug" if args.debug else "normal"
+    scanner_logger = setup_logging(mode)
 
     # Validate flag values
     if args.delta_tolerance < 0.01 or args.delta_tolerance > 0.10:
-        print("ERROR: --delta-tolerance must be between 0.01 and 0.10", file=sys.stderr)
+        scanner_logger.error("SCANNER: --delta-tolerance must be between 0.01 and 0.10")
         sys.exit(1)
 
     username = os.environ.get("TT_USERNAME", "").strip()
     password = os.environ.get("TT_PASSWORD", "").strip()
     if not username or not password:
-        print("ERROR: Set TT_USERNAME and TT_PASSWORD env vars.", file=sys.stderr)
+        scanner_logger.error("SCANNER: Set TT_USERNAME and TT_PASSWORD env vars")
         sys.exit(2)
 
     # Create session
@@ -1787,20 +1901,20 @@ Examples:
 
         # Log results
         elapsed = time.time() - start_time
-        print(f"Earnings pre-filter: {len(tickers)} → {len(passing_symbols)} passed ({len(filtered_symbols)} filtered)")
-        print(f"  Cache hits: {cache_hits} | Fresh fetches: {fresh_fetches}")
-        print(f"  Earnings check completed in {elapsed:.1f}s")
+        scanner_logger.info(f"SCANNER: Earnings pre-filter: {len(tickers)} → {len(passing_symbols)} passed ({len(filtered_symbols)} filtered)")
+        scanner_logger.info(f"SCANNER: Cache hits: {cache_hits} | Fresh fetches: {fresh_fetches}")
+        scanner_logger.info(f"SCANNER: Earnings check completed in {elapsed:.1f}s")
 
         if args.show_earnings_conflicts:
             for symbol, reason in filtered_symbols:
-                print(f"  {symbol}: {reason}")
+                scanner_logger.info(f"SCANNER: {symbol}: {reason}")
 
         # Only process passing symbols
         tickers = passing_symbols
 
         # Early exit if all symbols filtered
         if not tickers:
-            print("No symbols passed earnings filter. Use --allow-earnings to scan through earnings.", file=sys.stderr)
+            scanner_logger.error("SCANNER: No symbols passed earnings filter. Use --allow-earnings to scan through earnings")
             sys.exit(0)
     else:
         # If --allow-earnings is set, mark all symbols as having earnings filter bypassed
@@ -1853,8 +1967,9 @@ Examples:
     ]
 
     if not rows:
-        print("No results passing filters.")
+        scanner_logger.info("SCANNER: No results passing filters")
     else:
+        # Print CSV to stdout (for piping/redirection)
         print(",".join(cols))
         for r in rows:
             print(",".join(str(r.get(c, "")) for c in cols))
@@ -1863,7 +1978,7 @@ Examples:
     if args.json_out and rows:
         with open(args.json_out, "w", encoding="utf-8") as f:
             json.dump(rows, f, indent=2)
-        print(f"Wrote JSON -> {args.json_out}", file=sys.stderr)
+        scanner_logger.info(f"SCANNER: Wrote JSON -> {args.json_out}")
 
     if args.csv_out and rows:
         import csv
@@ -1871,19 +1986,19 @@ Examples:
             w = csv.DictWriter(f, fieldnames=cols)
             w.writeheader()
             w.writerows(rows)
-        print(f"Wrote CSV -> {args.csv_out}", file=sys.stderr)
+        scanner_logger.info(f"SCANNER: Wrote CSV -> {args.csv_out}")
 
     # Print scan summary statistics
     total_skipped = sum(skip_stats.values())
-    print(f"\n=== Scan Summary ===", file=sys.stderr)
-    print(f"Scanned: {scanned} symbols", file=sys.stderr)
-    print(f"Passed: {passed} opportunities", file=sys.stderr)
-    print(f"Skipped: {total_skipped} symbols", file=sys.stderr)
+    scanner_logger.info("SCANNER: === Scan Summary ===")
+    scanner_logger.info(f"SCANNER: Scanned: {scanned} symbols")
+    scanner_logger.info(f"SCANNER: Passed: {passed} opportunities")
+    scanner_logger.info(f"SCANNER: Skipped: {total_skipped} symbols")
     if total_skipped > 0:
-        print(f"\nSkip breakdown:", file=sys.stderr)
+        scanner_logger.info("SCANNER: Skip breakdown:")
         for reason, count in skip_stats.items():
             if count > 0:
-                print(f"  - {reason}: {count}", file=sys.stderr)
+                scanner_logger.info(f"SCANNER:   - {reason}: {count}")
 
 if __name__ == "__main__":
     main()

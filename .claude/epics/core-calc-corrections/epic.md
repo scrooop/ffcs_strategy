@@ -1,8 +1,9 @@
 ---
 name: core-calc-corrections
-status: backlog
+status: completed
 created: 2025-10-20T04:32:53Z
-progress: 0%
+updated: 2025-10-20T07:01:58Z
+progress: 100%
 prd: .claude/prds/core-calc-corrections.md
 github: https://github.com/scrooop/ffcs_strategy/issues/22
 ---

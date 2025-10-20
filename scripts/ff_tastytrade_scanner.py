@@ -264,11 +264,51 @@ def nearest_expiration(chain, target_dte: int, dte_tolerance: int) -> Optional[d
         return best_exp
     return None
 
-def pick_atm_strike(expiration_obj, spot: float) -> Tuple[float, str, str]:
+def pick_atm_strike(expiration_obj, spot: float, greeks_map: Optional[Dict[str, Tuple[float, float]]] = None) -> Tuple[float, Optional[float], str, str]:
     """
-    From a NestedOptionChain expiration, choose the strike closest to spot.
-    Return (strike, call_streamer_symbol, put_streamer_symbol).
+    From a NestedOptionChain expiration, choose the strike with call delta closest to 50Δ.
+    If greeks_map unavailable or no strikes within ±10Δ tolerance, fall back to nearest-spot.
+
+    Args:
+        expiration_obj: NestedOptionChain expiration object
+        spot: Current underlying spot price
+        greeks_map: Optional dict mapping streamer_symbol -> (iv, delta) tuple
+
+    Returns:
+        (strike, actual_delta, call_streamer_symbol, put_streamer_symbol)
+        - actual_delta is None if fallback to nearest-spot was used
     """
+    # Primary: Delta-based selection (50Δ target)
+    if greeks_map:
+        best_strike = None
+        best_delta = None
+        best_call_sym = None
+        best_put_sym = None
+        min_delta_distance = float('inf')
+
+        for s in expiration_obj.strikes:
+            call_sym = s.call_streamer_symbol
+            if call_sym in greeks_map:
+                _, call_delta = greeks_map[call_sym]
+                if call_delta is not None:
+                    delta_distance = abs(call_delta - ATM_DELTA_TARGET)
+                    if delta_distance < min_delta_distance:
+                        min_delta_distance = delta_distance
+                        best_strike = float(s.strike_price)
+                        best_delta = call_delta
+                        best_call_sym = call_sym
+                        best_put_sym = s.put_streamer_symbol
+
+        # If we found a strike within tolerance, use it
+        if best_strike is not None and min_delta_distance <= ATM_DELTA_TOLERANCE:
+            logger.debug(f"ATM strike selected by delta: {best_strike} (delta={best_delta:.3f})")
+            return (best_strike, best_delta, best_call_sym, best_put_sym)
+
+        # Log fallback
+        if best_strike is not None:
+            logger.debug(f"No 50Δ strike within ±{ATM_DELTA_TOLERANCE} tolerance (best: {min_delta_distance:.3f}), using nearest-spot fallback")
+
+    # Fallback: Nearest-to-spot (original logic)
     best = None
     best_err = None
     for s in expiration_obj.strikes:
@@ -277,9 +317,12 @@ def pick_atm_strike(expiration_obj, spot: float) -> Tuple[float, str, str]:
         if best_err is None or err < best_err:
             best_err = err
             best = (strike, s.call_streamer_symbol, s.put_streamer_symbol)
+
     if best is None:
         raise RuntimeError("No strikes found in expiration.")
-    return best
+
+    strike, call_sym, put_sym = best
+    return (strike, None, call_sym, put_sym)  # actual_delta = None for fallback
 
 async def snapshot_greeks(session: Session, streamer_symbols: List[str], timeout_s: float = 3.0) -> Dict[str, Tuple[float, float]]:
     """

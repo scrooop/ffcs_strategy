@@ -587,27 +587,27 @@ The scanner outputs a unified CSV schema that supports both ATM and double calen
 | `iv_source_put_back` | enum | Put IV source for back: `greeks` or `exearn_fallback` | *(empty)* | ✅ |
 | `earnings_conflict` | enum | `yes` or `no` | ✅ | ✅ |
 | `earnings_date` | date | Expected earnings report date (YYYY-MM-DD, empty if none) | ✅ | ✅ |
-| `avg_options_volume_20d` | float | Average options volume over 20 days (from liquidity_value field) | ✅ | ✅ |
+| `option_volume_today` | integer | Today's total option chain volume (from dxFeed Underlying.optionVolume) | ✅ | ✅ |
 | `earnings_source` | enum | Earnings data source: `cache`, `yahoo`, `tastytrade`, `none`, or `skipped` | ✅ | ✅ |
 | `skip_reason` | string | Reason symbol was filtered (e.g., "earnings_conflict", "volume_too_low", empty if not skipped) | ✅ | ✅ |
 
 **Complete Column Order (39 columns):**
-`timestamp`, `symbol`, `structure`, `spot_price`, `front_dte`, `back_dte`, `front_expiry`, `back_expiry`, `atm_strike`, `atm_delta`, `atm_ff`, `atm_iv_front`, `atm_iv_back`, `atm_fwd_iv`, `atm_iv_source_front`, `atm_iv_source_back`, `call_strike`, `put_strike`, `call_delta`, `put_delta`, `call_ff`, `put_ff`, `min_ff`, `combined_ff`, `call_front_iv`, `call_back_iv`, `call_fwd_iv`, `put_front_iv`, `put_back_iv`, `put_fwd_iv`, `iv_source_call_front`, `iv_source_call_back`, `iv_source_put_front`, `iv_source_put_back`, `earnings_conflict`, `earnings_date`, `avg_options_volume_20d`, `earnings_source`, `skip_reason`
+`timestamp`, `symbol`, `structure`, `spot_price`, `front_dte`, `back_dte`, `front_expiry`, `back_expiry`, `atm_strike`, `atm_delta`, `atm_ff`, `atm_iv_front`, `atm_iv_back`, `atm_fwd_iv`, `atm_iv_source_front`, `atm_iv_source_back`, `call_strike`, `put_strike`, `call_delta`, `put_delta`, `call_ff`, `put_ff`, `min_ff`, `combined_ff`, `call_front_iv`, `call_back_iv`, `call_fwd_iv`, `put_front_iv`, `put_back_iv`, `put_fwd_iv`, `iv_source_call_front`, `iv_source_call_back`, `iv_source_put_front`, `iv_source_put_back`, `earnings_conflict`, `earnings_date`, `option_volume_today`, `earnings_source`, `skip_reason`
 
 ### Example CSV Output (v2.2)
 
 **ATM Call Calendar:**
 
 ```csv
-timestamp,symbol,structure,spot_price,front_dte,back_dte,front_expiry,back_expiry,atm_strike,atm_delta,atm_ff,atm_iv_front,atm_iv_back,atm_fwd_iv,atm_iv_source_front,atm_iv_source_back,call_strike,put_strike,call_delta,put_delta,call_ff,put_ff,min_ff,combined_ff,call_front_iv,call_back_iv,call_fwd_iv,put_front_iv,put_back_iv,put_fwd_iv,iv_source_call_front,iv_source_call_back,iv_source_put_front,iv_source_put_back,earnings_conflict,earnings_date,avg_options_volume_20d,earnings_source,skip_reason
-2025-10-19T14:30:00+00:00,SPY,atm-call,580.50,30,60,2025-11-18,2025-12-18,580.00,0.498,0.166,0.185,0.172,0.159,greeks,greeks,,,,,,,,0.185,0.172,0.159,0.185,0.172,0.159,,,,,no,,117690.89,cache,
+timestamp,symbol,structure,spot_price,front_dte,back_dte,front_expiry,back_expiry,atm_strike,atm_delta,atm_ff,atm_iv_front,atm_iv_back,atm_fwd_iv,atm_iv_source_front,atm_iv_source_back,call_strike,put_strike,call_delta,put_delta,call_ff,put_ff,min_ff,combined_ff,call_front_iv,call_back_iv,call_fwd_iv,put_front_iv,put_back_iv,put_fwd_iv,iv_source_call_front,iv_source_call_back,iv_source_put_front,iv_source_put_back,earnings_conflict,earnings_date,option_volume_today,earnings_source,skip_reason
+2025-10-19T14:30:00+00:00,SPY,atm-call,580.50,30,60,2025-11-18,2025-12-18,580.00,0.498,0.166,0.185,0.172,0.159,greeks,greeks,,,,,,,,0.185,0.172,0.159,0.185,0.172,0.159,,,,,no,,117691,cache,
 ```
 
 **Double Calendar:**
 
 ```csv
-timestamp,symbol,structure,spot_price,front_dte,back_dte,front_expiry,back_expiry,atm_strike,atm_delta,atm_ff,atm_iv_front,atm_iv_back,atm_fwd_iv,atm_iv_source_front,atm_iv_source_back,call_strike,put_strike,call_delta,put_delta,call_ff,put_ff,min_ff,combined_ff,call_front_iv,call_back_iv,call_fwd_iv,put_front_iv,put_back_iv,put_fwd_iv,iv_source_call_front,iv_source_call_back,iv_source_put_front,iv_source_put_back,earnings_conflict,earnings_date,avg_options_volume_20d,earnings_source,skip_reason
-2025-10-19T14:30:00+00:00,SPY,double,580.50,30,60,2025-11-18,2025-12-18,,,,,,,, 595.00,565.00,0.3498,-0.3512,0.177,0.168,0.168,0.172,0.192,0.175,0.164,0.188,0.173,0.161,greeks,greeks,greeks,greeks,no,,117690.89,yahoo,
+timestamp,symbol,structure,spot_price,front_dte,back_dte,front_expiry,back_expiry,atm_strike,atm_delta,atm_ff,atm_iv_front,atm_iv_back,atm_fwd_iv,atm_iv_source_front,atm_iv_source_back,call_strike,put_strike,call_delta,put_delta,call_ff,put_ff,min_ff,combined_ff,call_front_iv,call_back_iv,call_fwd_iv,put_front_iv,put_back_iv,put_fwd_iv,iv_source_call_front,iv_source_call_back,iv_source_put_front,iv_source_put_back,earnings_conflict,earnings_date,option_volume_today,earnings_source,skip_reason
+2025-10-19T14:30:00+00:00,SPY,double,580.50,30,60,2025-11-18,2025-12-18,,,,,,,, 595.00,565.00,0.3498,-0.3512,0.177,0.168,0.168,0.172,0.192,0.175,0.164,0.188,0.173,0.161,greeks,greeks,greeks,greeks,no,,117691,yahoo,
 ```
 
 **Key Differences (v2.2):**
@@ -1141,7 +1141,7 @@ python -m pip uninstall tastytrade
 
 ## Version History
 
-- **v2.2** (October 2025): Core calculation corrections - 50Δ ATM strike selection, simplified ATM FF calculation (single atm_ff), double calendar min-gating (min_ff column), volume-based liquidity (avg_options_volume_20d), 39-column CSV schema (+9 columns)
+- **v2.2** (October 2025): Core calculation corrections - 50Δ ATM strike selection, simplified ATM FF calculation (single atm_ff), double calendar min-gating (min_ff column), volume-based liquidity (option_volume_today from dxFeed Underlying), 39-column CSV schema (+9 columns)
 - **v2.1** (October 2025): Fast earnings check with caching (80-95% runtime reduction), multi-source earnings pipeline (Cache → Yahoo → TastyTrade), 31-column CSV schema with earnings_source tracking, CLI cleanup
 - **v2.0** (October 2025): Earnings filtering, liquidity screening, X-earn IV support, double calendar scanning, enhanced CSV output (28 columns)
 - **v1.0** (Initial release): ATM calendar scanning with Forward Factor calculation

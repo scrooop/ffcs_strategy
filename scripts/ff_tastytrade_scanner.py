@@ -369,6 +369,40 @@ async def snapshot_greeks(session: Session, streamer_symbols: List[str], timeout
 
     return results
 
+async def snapshot_underlying(session: Session, symbol: str, timeout_s: float = 3.0):
+    """
+    Fetch Underlying event from dxFeed for today's option chain volume.
+
+    Args:
+        session: Active tastytrade session
+        symbol: Ticker symbol (e.g., 'SPY', 'MSFT')
+        timeout_s: Timeout in seconds for snapshot collection
+
+    Returns:
+        Underlying event object with option_volume field, or None on timeout/error
+        - option_volume: Today's total option chain volume (all strikes/expirations/types)
+
+    Note:
+        option_volume represents today's aggregate volume across the entire option chain
+        (all strikes, all expirations, calls + puts). This is the correct metric for
+        volume-based liquidity filtering.
+    """
+    from tastytrade.dxfeed import Underlying
+
+    async with DXLinkStreamer(session) as streamer:
+        await streamer.subscribe(Underlying, [symbol])
+
+        try:
+            async with asyncio.timeout(timeout_s):
+                async for event in streamer.listen(Underlying):
+                    if event.eventSymbol == symbol:
+                        return event
+        except asyncio.TimeoutError:
+            logger.warning(f"{symbol}: Timeout fetching Underlying event")
+            return None
+
+    return None
+
 def validate_ff_inputs(iv_front: float, iv_back: float, dte_front: int, dte_back: int) -> Optional[str]:
     """
     Validate inputs for forward volatility calculation.
@@ -642,12 +676,13 @@ async def get_double_calendar_strikes(
 
 def fetch_market_metrics(session: Session, symbols: List[str]) -> Dict[str, any]:
     """
-    Batch fetch earnings dates, average options volume, and X-earn IV data for all symbols.
+    Batch fetch earnings dates and X-earn IV data for all symbols.
 
     Calls tastytrade's get_market_metrics() API to retrieve:
     - Earnings dates (earnings.expected_report_date)
-    - Average options volume (liquidity_value field as volume proxy)
     - X-earn IV by expiration (option_expiration_implied_volatilities)
+
+    Note: Volume filtering now uses dxFeed Underlying.optionVolume instead of liquidity_value
 
     Args:
         session: Active tastytrade session (must be authenticated)
@@ -661,14 +696,12 @@ def fetch_market_metrics(session: Session, symbols: List[str]) -> Dict[str, any]
         None (logs error to stderr and returns empty dict on failure)
 
     Note:
-        - liquidity_value is used as a proxy for average options volume
+        - Volume filtering now uses dxFeed Underlying.optionVolume (fetched separately)
         - Field may be None for futures or illiquid symbols
         - Futures symbols are allowed through if volume field is missing
 
     Example:
         >>> metrics = fetch_market_metrics(session, ['SPY', 'QQQ'])
-        >>> metrics['SPY'].liquidity_value
-        117690.89
         >>> metrics['SPY'].earnings.expected_report_date
         date(2025, 10, 25)
     """
@@ -907,7 +940,7 @@ async def scan(session: Session, tickers: List[str], pairs: List[Tuple[int, int]
           - call_front_iv, call_back_iv, call_fwd_iv (call leg IVs)
           - put_front_iv, put_back_iv, put_fwd_iv (put leg IVs)
           - earnings_conflict, earnings_date
-          - liquidity_rating, liquidity_value
+          - option_volume_today (today's total option chain volume from dxFeed Underlying)
           - iv_source_call_front, iv_source_call_back (call leg IV sources: "xearn" or "greeks")
           - iv_source_put_front, iv_source_put_back (put leg IV sources)
           - earnings_source (data source: "cache", "yahoo", "tastytrade", "none", or "skipped")
@@ -990,9 +1023,8 @@ async def scan(session: Session, tickers: List[str], pairs: List[Tuple[int, int]
                 print(f"[WARN] Could not get market data for {sym}: {e}, skipping.", file=sys.stderr)
                 continue
 
-        # 2) Extract earnings and volume data for this symbol
+        # 2) Extract earnings data for this symbol
         earnings_date = None
-        avg_volume = None
         earnings_source = "none"  # Default: no earnings data found
 
         if sym in market_metrics:
@@ -1000,11 +1032,23 @@ async def scan(session: Session, tickers: List[str], pairs: List[Tuple[int, int]
             earnings = getattr(metric_info, 'earnings', None)
             if earnings:
                 earnings_date = getattr(earnings, 'expected_report_date', None)
-            avg_volume = getattr(metric_info, 'liquidity_value', None)
 
         # Determine earnings_source from earnings_data dict (if provided)
         if earnings_data is not None and sym in earnings_data:
             earnings_source = earnings_data[sym].get('source', 'none')
+
+        # 2b) Fetch today's option volume from dxFeed Underlying event
+        option_volume = None
+        try:
+            underlying_event = await snapshot_underlying(session, sym, timeout_s=timeout_s)
+            if underlying_event is not None:
+                option_volume = underlying_event.option_volume
+                logger.info(f"{sym}: Option volume today: {option_volume}")
+            else:
+                logger.warning(f"{sym}: No Underlying event received")
+        except Exception as e:
+            logger.warning(f"{sym}: Failed to fetch Underlying event: {e}")
+            option_volume = None
 
         # 3) Chain (nested) - handle futures vs equity
         if is_futures_symbol(sym):
@@ -1047,11 +1091,13 @@ async def scan(session: Session, tickers: List[str], pairs: List[Tuple[int, int]
                 continue
 
         if not skip_liquidity_check:
-            passes, reason = check_volume(sym, market_metrics, min_avg_volume)
-            if not passes:
+            # Check if option volume meets minimum threshold
+            if option_volume is None:
+                logger.info(f"{sym}: Option volume unavailable, allowing through")
+            elif option_volume < min_avg_volume:
                 skip_stats[SKIP_VOLUME_TOO_LOW] += 1
-                logger.debug(f"Skipping {sym}: {SKIP_VOLUME_TOO_LOW} - {reason}")
-                print(f"[INFO] {sym}: {reason}, skipping", file=sys.stderr)
+                logger.info(f"{sym}: Option volume {option_volume:.0f} < {min_avg_volume:.0f}, skipping")
+                print(f"[INFO] {sym}: Option volume {option_volume:.0f} below threshold {min_avg_volume:.0f}, skipping", file=sys.stderr)
                 continue
 
         # 4) Branch based on calendar structure mode
@@ -1281,7 +1327,7 @@ async def scan(session: Session, tickers: List[str], pairs: List[Tuple[int, int]
                         # Quality filters (4)
                         "earnings_conflict": "no" if not earnings_date else "",
                         "earnings_date": earnings_date.isoformat() if earnings_date else "",
-                        "avg_options_volume_20d": f"{avg_volume:.2f}" if avg_volume is not None else "",
+                        "option_volume_today": f"{option_volume:.0f}" if option_volume is not None else "",
                         "earnings_source": earnings_source,
                         # Tracking (1)
                         "skip_reason": ""
@@ -1480,7 +1526,7 @@ async def scan(session: Session, tickers: List[str], pairs: List[Tuple[int, int]
                         # Quality filters (4)
                         "earnings_conflict": "no" if not earnings_date else "",
                         "earnings_date": earnings_date.isoformat() if earnings_date else "",
-                        "avg_options_volume_20d": f"{avg_volume:.2f}" if avg_volume is not None else "",
+                        "option_volume_today": f"{option_volume:.0f}" if option_volume is not None else "",
                         "earnings_source": earnings_source,
                         # Tracking (1)
                         "skip_reason": ""
@@ -1723,7 +1769,7 @@ Examples:
     # v2.2 CSV schema (39 columns)
     # Breaking changes from v2.1:
     # - Added: atm_iv_source_front, atm_iv_source_back (ATM-specific IV source tracking)
-    # - Renamed: avg_options_volume → avg_options_volume_20d
+    # - Renamed: avg_options_volume_20d → option_volume_today (now using dxFeed Underlying.optionVolume)
     # - Reordered: Logical grouping by structure (common, ATM, double, IV detail, sources, quality)
     cols = [
         # Common (8)
@@ -1744,7 +1790,7 @@ Examples:
         "iv_source_put_front", "iv_source_put_back",
         # Quality filters (4)
         "earnings_conflict", "earnings_date",
-        "avg_options_volume_20d", "earnings_source",
+        "option_volume_today", "earnings_source",
         # Tracking (1)
         "skip_reason"
     ]

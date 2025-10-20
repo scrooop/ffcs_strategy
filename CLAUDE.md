@@ -350,14 +350,14 @@ Results are sorted by `atm_ff` (for ATM structure) or `min_ff` (for double struc
 **Quality Filter Columns (All Structures - 4 columns):**
 - `earnings_conflict`: "yes" or "no"
 - `earnings_date`: Next earnings date (YYYY-MM-DD, empty if none)
-- `avg_options_volume_20d`: Average options volume over 20 days (from liquidity_value field)
+- `option_volume_today`: Today's total option chain volume (from dxFeed Underlying.optionVolume - all strikes/expirations/types)
 - `earnings_source`: Earnings data source ("cache", "yahoo", "tastytrade", "none", or "skipped")
 
 **Tracking Column (All Structures - 1 column):**
 - `skip_reason`: Reason symbol was filtered (e.g., "earnings_conflict", "volume_too_low", "no_strikes", empty if not skipped)
 
 **Complete Column Order (39 columns):**
-`timestamp`, `symbol`, `structure`, `spot_price`, `front_dte`, `back_dte`, `front_expiry`, `back_expiry`, `atm_strike`, `atm_delta`, `atm_ff`, `atm_iv_front`, `atm_iv_back`, `atm_fwd_iv`, `atm_iv_source_front`, `atm_iv_source_back`, `call_strike`, `put_strike`, `call_delta`, `put_delta`, `call_ff`, `put_ff`, `min_ff`, `combined_ff`, `call_front_iv`, `call_back_iv`, `call_fwd_iv`, `put_front_iv`, `put_back_iv`, `put_fwd_iv`, `iv_source_call_front`, `iv_source_call_back`, `iv_source_put_front`, `iv_source_put_back`, `earnings_conflict`, `earnings_date`, `avg_options_volume_20d`, `earnings_source`, `skip_reason`
+`timestamp`, `symbol`, `structure`, `spot_price`, `front_dte`, `back_dte`, `front_expiry`, `back_expiry`, `atm_strike`, `atm_delta`, `atm_ff`, `atm_iv_front`, `atm_iv_back`, `atm_fwd_iv`, `atm_iv_source_front`, `atm_iv_source_back`, `call_strike`, `put_strike`, `call_delta`, `put_delta`, `call_ff`, `put_ff`, `min_ff`, `combined_ff`, `call_front_iv`, `call_back_iv`, `call_fwd_iv`, `put_front_iv`, `put_back_iv`, `put_fwd_iv`, `iv_source_call_front`, `iv_source_call_back`, `iv_source_put_front`, `iv_source_put_back`, `earnings_conflict`, `earnings_date`, `option_volume_today`, `earnings_source`, `skip_reason`
 
 ### Migration Guide: v2.1 → v2.2
 
@@ -371,9 +371,9 @@ Results are sorted by `atm_ff` (for ATM structure) or `min_ff` (for double struc
 
 | v2.1 Column | v2.2 Column | Notes |
 |-------------|-------------|-------|
-| `avg_options_volume` | `avg_options_volume_20d` | Renamed for clarity (20-day average) |
+| `avg_options_volume` | `option_volume_today` | Changed to today's volume from dxFeed Underlying.optionVolume |
 | `liquidity_rating` | (removed) | Replaced by transparent volume filtering |
-| `liquidity_value` | (removed) | Now use `avg_options_volume_20d` directly |
+| `liquidity_value` | (removed) | Now use `option_volume_today` directly |
 | N/A | `atm_strike` | NEW: Strike with delta closest to 50Δ |
 | N/A | `atm_delta` | NEW: Actual delta of selected ATM strike |
 | N/A | `atm_ff` | NEW: Single FF for ATM structure (replaces dual call_ff/put_ff) |
@@ -402,13 +402,14 @@ Results are sorted by `atm_ff` (for ATM structure) or `min_ff` (for double struc
 
 3. **Column Rename:**
    - v2.1: `avg_options_volume`
-   - v2.2: `avg_options_volume_20d`
+   - v2.2: `option_volume_today`
    - **Impact:** CSV parsers must update column name reference
+   - **Data Change:** Now shows today's actual volume (dxFeed Underlying) instead of 20-day average
 
 4. **Removed Columns:**
    - v2.1: `liquidity_rating`, `liquidity_value` (removed in v2.2, already gone in v2.1.1)
-   - v2.2: Use `avg_options_volume_20d` for volume-based filtering
-   - **Impact:** Update filters to use `avg_options_volume_20d >= 10000` instead of `liquidity_rating >= 3`
+   - v2.2: Use `option_volume_today` for volume-based filtering
+   - **Impact:** Update filters to use `option_volume_today >= 10000` instead of `liquidity_rating >= 3`
 
 5. **Double Calendar Sorting Change:**
    - v2.1: Sorted by `combined_ff` (average of call and put FFs)
@@ -430,7 +431,7 @@ Updated:
 
 1. **Update column count:** 31 → 39
 2. **Add new columns:** Parse `atm_strike`, `atm_delta`, `atm_ff`, `atm_iv_*`, `min_ff`, `skip_reason`
-3. **Rename column:** `avg_options_volume` → `avg_options_volume_20d`
+3. **Rename column:** `avg_options_volume` → `option_volume_today` (data change: today's volume, not 20-day average)
 4. **Remove column references:** Delete `liquidity_rating`, `liquidity_value` from parsers
 5. **Update ATM logic:** Check `atm_ff` for ATM structures (not `call_ff`/`put_ff`/`combined_ff`)
 6. **Update double logic:** Use `min_ff` for filtering, `combined_ff` for ranking
@@ -454,8 +455,8 @@ double_opps = df[df["structure"] == "double"]
 double_opps = double_opps[double_opps["min_ff"] >= 0.20]  # v2.2: min_ff for filtering
 double_opps = double_opps.sort_values("min_ff", ascending=False)  # or combined_ff for ranking
 
-# Volume filtering (updated column name)
-filtered = df[df["avg_options_volume_20d"] >= 10000]  # v2.2: renamed column
+# Volume filtering (updated column name and data source)
+filtered = df[df["option_volume_today"] >= 10000]  # v2.2: today's volume from dxFeed
 ```
 
 ## Strategy Implementation Notes
@@ -593,7 +594,7 @@ filtered = df[df["avg_options_volume_20d"] >= 10000]  # v2.2: renamed column
 When symbols are filtered, `skip_reason` column contains:
 
 - `earnings_conflict`: Earnings between today and back expiry
-- `volume_too_low`: avg_options_volume_20d below threshold
+- `volume_too_low`: option_volume_today below threshold
 - `no_strikes`: No strikes found for target DTE within tolerance
 - `delta_not_found`: No strikes with delta within tolerance (ATM or double)
 - `greeks_timeout`: Greeks IV timeout, no fallback available
@@ -743,8 +744,8 @@ Scanner could be extended with:
 - `skip_reason`: Tracking field for filtering reasons
 
 **Renamed/Removed:**
-- `avg_options_volume` → `avg_options_volume_20d` (clarifies 20-day average)
-- Removed: `liquidity_rating`, `liquidity_value` (replaced by transparent volume)
+- `avg_options_volume` → `option_volume_today` (changed to today's volume from dxFeed Underlying.optionVolume)
+- Removed: `liquidity_rating`, `liquidity_value` (replaced by transparent volume from dxFeed)
 
 **CLI Changes:**
 - Removed flags: `--use-xearn-iv`, `--force-greeks-iv`, `--min-liquidity-rating`

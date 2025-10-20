@@ -38,7 +38,7 @@ The FF Scanner is a production-ready CLI tool that scans liquid options to ident
 
 **v2.0 Enhancements:**
 - ✅ **Earnings Filtering**: Automatically skip positions with earnings between today and back expiry
-- ✅ **Liquidity Screening**: Filter by tastytrade liquidity rating (0-5 scale)
+- ✅ **Volume Filtering**: Filter by average options volume (transparent threshold)
 - ✅ **X-earn IV Support**: Use earnings-removed IV when available, fall back to Greeks IV (works for both ATM and double calendars)
 - ✅ **Double Calendar Scanning**: Find ±35Δ strikes for call and put calendars (requires BOTH legs)
 - ✅ **Enhanced CSV Output**: 30-column schema with call/put-specific IVs, timestamps, deltas, and IV sources
@@ -156,7 +156,7 @@ python scripts/ff_tastytrade_scanner.py \
   --tickers SPY QQQ AAPL TSLA NVDA META AMZN GOOGL MSFT AMD \
   --pairs 30-60 30-90 60-90 \
   --min-ff 0.23 \
-  --min-liquidity-rating 3 \
+  --min-avg-volume 10000 \
   --structure both \
   --csv-out "$(date +%y%m%d_%H%M)_ff_scan.csv"
 ```
@@ -264,16 +264,16 @@ python scripts/ff_tastytrade_scanner.py \
 
 **Default Behavior**: Earnings filtering is **enabled by default**. Symbols with earnings between today and back expiration are automatically skipped.
 
-### Liquidity Screening
+### Volume Filtering
 
 | Flag | Type | Default | Description |
 |------|------|---------|-------------|
-| `--min-liquidity-rating` | int | `3` | Minimum liquidity rating (0-5 scale). See [Liquidity Rating System](#liquidity-rating-system). |
-| `--skip-liquidity-check` | flag | `False` | Disable liquidity filtering (not recommended). |
+| `--min-avg-volume` | float | `10000` | Minimum average options volume (contracts/day). Transparent, numerical threshold. |
+| `--skip-liquidity-check` | flag | `False` | Disable volume filtering (not recommended). |
 
 **Recommended Thresholds:**
-- `3`: Standard (≈10k+ contracts/day avg volume)
-- `4`: High liquidity (≈50k+ contracts/day)
+- `10000`: Standard (≈10k+ contracts/day avg volume) - Use for production
+- `50000`: High volume (≈50k+ contracts/day) - Use for large positions
 - `5`: Extremely liquid (≈100k+ contracts/day)
 
 ### X-earn IV Support
@@ -379,20 +379,20 @@ The original research required "20-day average option volume above 10,000 contra
 
 **Flags:**
 
-- `--min-liquidity-rating 3`: Default threshold (≈10k+ contracts/day)
+- `--min-avg-volume 10000`: Default threshold (≈10k+ contracts/day)
 - `--skip-liquidity-check`: Disable liquidity filtering (not recommended)
 
 **Example:**
 
 ```bash
 # Standard liquidity (≈10k+ contracts/day)
-python scripts/ff_tastytrade_scanner.py --tickers SPY QQQ AAPL --min-liquidity-rating 3
+python scripts/ff_tastytrade_scanner.py --tickers SPY QQQ AAPL --min-avg-volume 10000
 
 # High liquidity only (≈50k+ contracts/day)
-python scripts/ff_tastytrade_scanner.py --tickers SPY QQQ --min-liquidity-rating 4
+python scripts/ff_tastytrade_scanner.py --tickers SPY QQQ --min-avg-volume 50000
 
 # Allow lower liquidity (≈1k+ contracts/day)
-python scripts/ff_tastytrade_scanner.py --tickers SPY QQQ AAPL TSLA --min-liquidity-rating 2
+python scripts/ff_tastytrade_scanner.py --tickers SPY QQQ AAPL TSLA --min-avg-volume 5000
 ```
 
 **Edge Cases:**
@@ -631,8 +631,7 @@ The scanner outputs a unified CSV schema that supports both ATM and double calen
 | `put_fwd_iv` | float | Forward IV for put leg (computed) | ✅ | ✅ |
 | `earnings_conflict` | enum | `yes` or `no` | ✅ | ✅ |
 | `earnings_date` | date | Expected earnings report date (YYYY-MM-DD, empty if none) | ✅ | ✅ |
-| `liquidity_rating` | int | tastytrade liquidity rating (0-5 scale) | ✅ | ✅ |
-| `liquidity_value` | float | *(reserved for future use, currently empty)* | *(empty)* | *(empty)* |
+| `avg_options_volume` | float | Average options volume (from liquidity_value field) | ✅ | ✅ |
 | `iv_source_call_front` | enum | Call IV source for front expiration: `xearn` or `greeks` | ✅ | ✅ |
 | `iv_source_call_back` | enum | Call IV source for back expiration: `xearn` or `greeks` | ✅ | ✅ |
 | `iv_source_put_front` | enum | Put IV source for front expiration: `xearn` or `greeks` | ✅ | ✅ |
@@ -644,15 +643,15 @@ The scanner outputs a unified CSV schema that supports both ATM and double calen
 **ATM Call Calendar:**
 
 ```csv
-timestamp,symbol,structure,call_ff,put_ff,combined_ff,spot_price,front_dte,back_dte,front_expiry,back_expiry,atm_strike,call_strike,put_strike,call_delta,put_delta,call_front_iv,call_back_iv,call_fwd_iv,put_front_iv,put_back_iv,put_fwd_iv,earnings_conflict,earnings_date,liquidity_rating,liquidity_value,iv_source_call_front,iv_source_call_back,iv_source_put_front,iv_source_put_back,earnings_source
-2025-10-19T14:30:00+00:00,SPY,atm-call,0.166234,0.165890,0.166062,580.50,30,60,2025-11-18,2025-12-18,580.00,,,,,0.185432,0.172145,0.158967,0.185001,0.171890,0.158745,no,,5,,xearn,xearn,xearn,xearn,cache
+timestamp,symbol,structure,call_ff,put_ff,combined_ff,spot_price,front_dte,back_dte,front_expiry,back_expiry,atm_strike,call_strike,put_strike,call_delta,put_delta,call_front_iv,call_back_iv,call_fwd_iv,put_front_iv,put_back_iv,put_fwd_iv,earnings_conflict,earnings_date,avg_options_volume,iv_source_call_front,iv_source_call_back,iv_source_put_front,iv_source_put_back,earnings_source
+2025-10-19T14:30:00+00:00,SPY,atm-call,0.166234,0.165890,0.166062,580.50,30,60,2025-11-18,2025-12-18,580.00,,,,,0.185432,0.172145,0.158967,0.185001,0.171890,0.158745,no,,117690.89,xearn,xearn,xearn,xearn,cache
 ```
 
 **Double Calendar:**
 
 ```csv
-timestamp,symbol,structure,call_ff,put_ff,combined_ff,spot_price,front_dte,back_dte,front_expiry,back_expiry,atm_strike,call_strike,put_strike,call_delta,put_delta,call_front_iv,call_back_iv,call_fwd_iv,put_front_iv,put_back_iv,put_fwd_iv,earnings_conflict,earnings_date,liquidity_rating,liquidity_value,iv_source_call_front,iv_source_call_back,iv_source_put_front,iv_source_put_back,earnings_source
-2025-10-19T14:30:00+00:00,SPY,double,0.177123,0.167523,0.172323,580.50,30,60,2025-11-18,2025-12-18,,595.00,565.00,0.3498,-0.3512,0.192456,0.175234,0.163512,0.188234,0.173456,0.161234,no,,5,,greeks,greeks,greeks,greeks,yahoo
+timestamp,symbol,structure,call_ff,put_ff,combined_ff,spot_price,front_dte,back_dte,front_expiry,back_expiry,atm_strike,call_strike,put_strike,call_delta,put_delta,call_front_iv,call_back_iv,call_fwd_iv,put_front_iv,put_back_iv,put_fwd_iv,earnings_conflict,earnings_date,avg_options_volume,iv_source_call_front,iv_source_call_back,iv_source_put_front,iv_source_put_back,earnings_source
+2025-10-19T14:30:00+00:00,SPY,double,0.177123,0.167523,0.172323,580.50,30,60,2025-11-18,2025-12-18,,595.00,565.00,0.3498,-0.3512,0.192456,0.175234,0.163512,0.188234,0.173456,0.161234,no,,117690.89,greeks,greeks,greeks,greeks,yahoo
 ```
 
 **Key Differences:**
@@ -717,11 +716,11 @@ python scripts/ff_tastytrade_scanner.py --tickers SPY QQQ --pairs 30-60 60-90 --
 ### Liquidity Thresholds
 
 **Recommended:**
-- `--min-liquidity-rating 3`: Standard (≈10k+ contracts/day) - **Use for production**
-- `--min-liquidity-rating 4`: High liquidity (≈50k+ contracts/day) - **Use for large position sizes**
+- `--min-avg-volume 10000`: Standard (≈10k+ contracts/day) - **Use for production**
+- `--min-avg-volume 50000`: High liquidity (≈50k+ contracts/day) - **Use for large position sizes**
 
 **Not Recommended:**
-- `--min-liquidity-rating 2`: Low liquidity (≈1-5k contracts/day) - Risk of wide spreads
+- `--min-avg-volume 5000`: Low liquidity (≈1-5k contracts/day) - Risk of wide spreads
 - `--skip-liquidity-check`: No filtering - Risk of illiquid options
 
 ### Position Sizing Guidelines
@@ -878,8 +877,8 @@ python scripts/ff_tastytrade_scanner.py --tickers SPY --pairs 30-60 --dte-tolera
    - **Solution:** Run with `--show-earnings-conflicts` to see what was filtered
    - **Solution:** If intentional, use `--allow-earnings` to disable filter
 
-2. **All symbols filtered by liquidity**
-   - **Solution:** Lower `--min-liquidity-rating` (try `2` instead of `3`)
+2. **All symbols filtered by volume**
+   - **Solution:** Lower `--min-avg-volume` (try `5000` instead of `10000`)
    - **Solution:** Use `--skip-liquidity-check` for testing
 
 3. **FF threshold too high**
@@ -979,7 +978,7 @@ python scripts/ff_tastytrade_scanner.py \
   --tickers SPY QQQ AAPL TSLA NVDA META AMZN GOOGL MSFT AMD \
   --pairs 30-60 30-90 60-90 \
   --min-ff 0.23 \
-  --min-liquidity-rating 3 \
+  --min-avg-volume 10000 \
   --structure both \
   --csv-out "$(date +%y%m%d_%H%M)_ff_scan.csv"
 ```
@@ -1018,7 +1017,7 @@ python scripts/ff_tastytrade_scanner.py \
   --tickers SPY QQQ IWM AAPL TSLA NVDA META AMZN GOOGL MSFT AMD \
   --pairs 30-60 60-90 \
   --min-ff 0.10 \
-  --min-liquidity-rating 2 \
+  --min-avg-volume 5000 \
   --structure both \
   --allow-earnings \
   --csv-out aggressive_scan.csv
@@ -1033,7 +1032,7 @@ python scripts/ff_tastytrade_scanner.py \
   --tickers SPY QQQ \
   --pairs 30-60 60-90 \
   --min-ff 0.20 \
-  --min-liquidity-rating 5 \
+  --min-avg-volume 100000 \
   --structure both \
   --csv-out megacap_scan.csv
 ```

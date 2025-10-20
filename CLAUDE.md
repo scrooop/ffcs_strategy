@@ -12,7 +12,7 @@ This is a **Forward Factor (FF) Calendar Spread** trading strategy implementatio
 - Trade calendar spreads when FF exceeds threshold (typically 0.20-0.23)
 - Hold until front expiry, then close entire spread
 
-**Version:** 2.1 - Fast earnings check with caching for 80-95% runtime reduction + enhanced quality filtering with earnings detection, liquidity screening, X-earn IV support, and double calendar structures
+**Version:** 2.2 - Greeks IV priority inversion (strike-level precision) + fast earnings check with caching for 80-95% runtime reduction + enhanced quality filtering with earnings detection, volume screening, and double calendar structures
 
 ## Repository Structure
 
@@ -39,14 +39,14 @@ ffcs_strategy/
    - Requires `TT_USERNAME` and `TT_PASSWORD` environment variables
    - Production environment required for live Greeks data (sandbox has limited market data)
 
-2. **Data Pipeline (v2.1):**
+2. **Data Pipeline (v2.2):**
    - **Fast earnings pre-filter** → Cache → Yahoo Finance → TastyTrade → Graceful degradation
-   - `fetch_market_metrics()` → batch fetch earnings dates + liquidity ratings for all symbols
-   - Earnings/liquidity pre-filtering → skip symbols BEFORE expensive API calls
+   - `fetch_market_metrics()` → batch fetch earnings dates + avg options volume for all symbols
+   - Earnings/volume pre-filtering → skip symbols BEFORE expensive API calls
    - `get_market_data()` → underlying spot price
    - `NestedOptionChain.get()` → expirations & strikes with streamer symbols
-   - `extract_xearn_iv()` → try X-earn IV (earnings-removed) from market metrics, fallback to Greeks IV
-   - `snapshot_greeks()` → async dxFeed Greeks snapshot for IV + delta
+   - `snapshot_greeks()` → async dxFeed Greeks snapshot for IV + delta (PRIMARY IV source)
+   - `extract_xearn_iv()` → ex-earn IV (earnings-removed) from market metrics (RARE fallback if Greeks missing)
    - Structure-based scanning: ATM-only, double calendar (±35Δ), or both
 
 3. **Forward IV Calculation:**
@@ -70,11 +70,11 @@ ffcs_strategy/
    - Collects (IV, delta) tuples for each strike with timeout (default 3s)
    - Handles partial results if some legs fail to arrive
 
-6. **Quality Filtering (v2.1):**
+6. **Quality Filtering (v2.2):**
    - **Fast earnings check:** Multi-source pipeline with SQLite cache for 80-95% runtime reduction
    - **Earnings detection:** Skip symbols with earnings between today and back expiry (default: enabled)
-   - **Liquidity screening:** Filter symbols by liquidity rating 0-5 (default: ≥3)
-   - **X-earn IV support:** Prefer earnings-removed IV when available, graceful fallback to Greeks IV
+   - **Volume filtering:** Filter symbols by average options volume (default: ≥10k contracts/day)
+   - **Greeks IV priority:** Strike-level IV from dxFeed Greeks (preserves skew), rare ex-earn IV fallback
    - **Delta tolerance:** Control strike selection precision for double calendars (default: ±5Δ)
 
 ## Running the Scanner
@@ -128,12 +128,6 @@ python scripts/ff_tastytrade_scanner.py \
   --pairs 30-60 \
   --show-earnings-conflicts
 
-# Force use of Greeks IV instead of X-earn IV
-python scripts/ff_tastytrade_scanner.py \
-  --tickers QQQ \
-  --pairs 60-90 \
-  --force-greeks-iv
-
 # Adjust delta tolerance for double calendars (tighter selection)
 python scripts/ff_tastytrade_scanner.py \
   --tickers SPY \
@@ -163,13 +157,9 @@ python scripts/ff_tastytrade_scanner.py \
 - `--allow-earnings`: Allow trading through earnings (disable earnings filtering)
 - `--show-earnings-conflicts`: Show filtered positions due to earnings
 
-**Liquidity Screening:**
-- `--min-liquidity-rating`: Minimum liquidity rating 0-5 (default: 3)
-- `--skip-liquidity-check`: Disable liquidity filtering
-
-**IV Data Source:**
-- `--use-xearn-iv`: Try to use X-earn IV from market metrics (default: enabled)
-- `--force-greeks-iv`: Force use of Greeks IV instead of X-earn IV
+**Volume Filtering:**
+- `--min-avg-volume`: Minimum average options volume (default: 10000 contracts/day)
+- `--skip-liquidity-check`: Disable volume filtering
 
 **Output Options:**
 - `--csv-out`: Write results to CSV file (recommended, 31-column schema)
@@ -219,10 +209,10 @@ python scripts/ff_tastytrade_scanner.py \
 - Override: Use `--allow-earnings` to disable filtering
 - Debugging: Use `--show-earnings-conflicts` to see filtered opportunities
 
-**Liquidity Screening:**
-- Default: Minimum liquidity rating of 3 (scale 0-5)
-- Rating 3 ≈ ~10k contracts/day average option volume
-- Rating 5 = highest liquidity (SPY, QQQ, AAPL, etc.)
+**Volume Filtering:**
+- Default: Minimum average options volume of 10,000 contracts/day
+- Uses liquidity_value field from Market Metrics API as volume proxy
+- Transparent, numerical threshold (replaces opaque rating system)
 - Override: Use `--skip-liquidity-check` to disable filtering
 
 **Delta Tolerance (Double Calendars):**
@@ -232,22 +222,26 @@ python scripts/ff_tastytrade_scanner.py \
 - Tighter tolerance (0.03): More precise strikes, may skip symbols
 - Looser tolerance (0.10): More opportunities, less precise deltas
 
-### X-earn IV Implementation
+### IV Source Priority (v2.2)
 
-**What is X-earn IV:**
-- Earnings-removed implied volatility from tastytrade Market Metrics API
-- More accurate forward IV when earnings are embedded in option prices
-- Automatically tried when available, falls back to Greeks IV if missing
+**Greeks IV is Primary (Strike-Level Precision):**
+- Strike-specific IV from dxFeed Greeks (preserves volatility smile/skew)
+- For double calendars: ±35Δ strikes may have 5-10% IV difference vs ATM
+- Wing-exact FF requires strike-specific IV for accurate pricing
+- Scanner always fetches Greeks IV first
 
-**How It Works:**
-1. Scanner first attempts to fetch X-earn IV from `option_expiration_implied_volatilities` field
-2. If unavailable or expiration not found, gracefully falls back to dxFeed Greeks IV
-3. CSV output includes `iv_source_call_front`, `iv_source_call_back`, `iv_source_put_front`, `iv_source_put_back` columns to track data source for each leg
-4. Source values: "xearn" (X-earn IV used) or "greeks" (dxFeed Greeks IV used)
+**Ex-earn IV is Rare Fallback (Expiration-Level):**
+- Earnings-removed IV from tastytrade Market Metrics API
+- Expiration-level only (single value per expiration, collapses skew)
+- Used only when Greeks IV missing/timeout for a specific leg
+- Less accurate for wings due to lack of strike-level granularity
 
-**Override Behavior:**
-- Default: `--use-xearn-iv` (try X-earn IV, fallback to Greeks IV)
-- `--force-greeks-iv`: Always use Greeks IV, never attempt X-earn IV
+**How It Works (v2.2):**
+1. Scanner fetches Greeks IV from dxFeed snapshot for all strikes (PRIMARY)
+2. If Greeks IV missing/invalid for any leg, fallback to ex-earn IV (RARE)
+3. CSV output tracks source per leg: `iv_source_call_front`, `iv_source_call_back`, `iv_source_put_front`, `iv_source_put_back`
+4. Source values: "greeks" (primary) or "exearn_fallback" (rare fallback)
+5. Logger warns when fallback used: `logger.warning("Greeks IV missing for X, using ex-earn fallback")`
 
 ### IV Variation Across Strikes: How It Affects FF Calculations
 
@@ -328,8 +322,7 @@ Results are sorted by `combined_ff` descending (highest opportunities first).
 - `put_front_iv`, `put_back_iv`, `put_fwd_iv`: Put leg IVs (decimal: 0.25 = 25%)
 - `earnings_conflict`: "yes" or "no"
 - `earnings_date`: Next earnings date (YYYY-MM-DD, empty if none)
-- `liquidity_rating`: Liquidity rating 0-5
-- `liquidity_value`: Numeric liquidity metric (currently unused)
+- `avg_options_volume`: Average options volume (from liquidity_value field)
 - `iv_source_call_front`, `iv_source_call_back`: Call IV sources ("xearn" or "greeks")
 - `iv_source_put_front`, `iv_source_put_back`: Put IV sources ("xearn" or "greeks")
 - `earnings_source`: Earnings data source ("cache", "yahoo", "tastytrade", "none", or "skipped")
@@ -348,7 +341,7 @@ Results are sorted by `combined_ff` descending (highest opportunities first).
 - Empty: `atm_strike`
 
 **Complete Column Order:**
-`timestamp`, `symbol`, `structure`, `call_ff`, `put_ff`, `combined_ff`, `spot_price`, `front_dte`, `back_dte`, `front_expiry`, `back_expiry`, `atm_strike`, `call_strike`, `put_strike`, `call_delta`, `put_delta`, `call_front_iv`, `call_back_iv`, `call_fwd_iv`, `put_front_iv`, `put_back_iv`, `put_fwd_iv`, `earnings_conflict`, `earnings_date`, `liquidity_rating`, `liquidity_value`, `iv_source_call_front`, `iv_source_call_back`, `iv_source_put_front`, `iv_source_put_back`, `earnings_source`
+`timestamp`, `symbol`, `structure`, `call_ff`, `put_ff`, `combined_ff`, `spot_price`, `front_dte`, `back_dte`, `front_expiry`, `back_expiry`, `atm_strike`, `call_strike`, `put_strike`, `call_delta`, `put_delta`, `call_front_iv`, `call_back_iv`, `call_fwd_iv`, `put_front_iv`, `put_back_iv`, `put_fwd_iv`, `earnings_conflict`, `earnings_date`, `avg_options_volume`, `iv_source_call_front`, `iv_source_call_back`, `iv_source_put_front`, `iv_source_put_back`, `earnings_source`
 
 ## Strategy Implementation Notes
 
@@ -397,7 +390,7 @@ Results are sorted by `combined_ff` descending (highest opportunities first).
 - If only one leg (call or put) IV arrives, scanner uses that single value
 - If both legs fail to arrive within timeout, that target DTE is skipped
 - Greeks.volatility is Black-Scholes IV (annualized, decimal format: 0.25 = 25%)
-- X-earn IV gracefully falls back to Greeks IV if unavailable (see CSV `iv_source` columns)
+- Greeks IV is primary (strike-level), ex-earn IV is rare fallback (see CSV `iv_source` columns)
 
 ### Earnings Filtering (v2.1)
 - **Fast pre-filter with caching:** Multi-source pipeline (Cache → Yahoo → TastyTrade) with 80-95% runtime reduction
@@ -407,11 +400,12 @@ Results are sorted by `combined_ff` descending (highest opportunities first).
 - Debugging: Use `--show-earnings-conflicts` to see what was filtered
 - Cache location: `.cache/earnings.db` (safe to delete, rebuilds automatically)
 
-### Liquidity Screening (v2.0)
-- **Now automated:** Scanner filters by liquidity rating (0-5 scale)
-- Default: Rating ≥3 (≈10k contracts/day avg volume)
+### Volume Filtering (v2.2)
+- **Transparent volume-based filter:** Uses avg options volume from Market Metrics API
+- Default: ≥10,000 contracts/day (liquidity_value field as proxy)
 - Override: Use `--skip-liquidity-check` to disable filtering
-- Rating 5 = highest liquidity (SPY, QQQ, AAPL, etc.)
+- Adjustable: Use `--min-avg-volume` to set custom threshold
+- Futures handling: Symbols without volume data are allowed through (not an error)
 
 ### Double Calendar Strike Selection (v2.0)
 - Target: ±35Δ strikes with configurable tolerance
@@ -498,7 +492,7 @@ python scripts/ff_tastytrade_scanner.py \
 
 Scanner could be extended with:
 - **Additional futures support** - Expand to more futures when tastytrade adds option chains
-- Bid-ask spread quality checks (tighter filtering beyond liquidity rating)
+- Bid-ask spread quality checks (tighter filtering beyond volume threshold)
 - Position tracking and P&L monitoring (track open positions)
 - Auto-execution via tastytrade order API (automated order placement)
 - Backtest framework using historical IV data (strategy validation)

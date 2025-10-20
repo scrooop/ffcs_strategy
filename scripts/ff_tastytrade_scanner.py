@@ -343,45 +343,22 @@ async def snapshot_greeks(session: Session, streamer_symbols: List[str], timeout
         Partial results are acceptable on timeout. Caller should handle missing data.
     """
     raw_results: Dict[str, Greeks] = {}
-    collector_task = None
 
-    try:
-        async with DXLinkStreamer(session) as streamer:
-            if streamer_symbols:
-                await streamer.subscribe(Greeks, streamer_symbols)
+    async with DXLinkStreamer(session) as streamer:
+        if streamer_symbols:
+            await streamer.subscribe(Greeks, streamer_symbols)
 
-                async def collector():
-                    try:
-                        async for g in streamer.listen(Greeks):
-                            raw_results[g.event_symbol] = g
-                            if len(raw_results) >= len(streamer_symbols):
-                                break
-                    except asyncio.CancelledError:
-                        # Task was cancelled, clean exit
-                        pass
+            async def collector():
+                async for g in streamer.listen(Greeks):
+                    raw_results[g.event_symbol] = g
+                    if len(raw_results) >= len(streamer_symbols):
+                        break
 
-                try:
-                    collector_task = asyncio.create_task(collector())
-                    await asyncio.wait_for(collector_task, timeout=timeout_s)
-                except asyncio.TimeoutError:
-                    # partial results are okay; caller will decide how to handle
-                    if collector_task and not collector_task.done():
-                        collector_task.cancel()
-                        try:
-                            await collector_task
-                        except asyncio.CancelledError:
-                            pass
-    except Exception as e:
-        # Handle streamer connection failures (timeout, network errors, etc.)
-        logger.warning(f"Greeks streamer connection failed: {e}. Continuing without Greeks data for this batch.")
-        # Clean up any pending tasks
-        if collector_task and not collector_task.done():
-            collector_task.cancel()
             try:
-                await collector_task
-            except asyncio.CancelledError:
+                await asyncio.wait_for(collector(), timeout=timeout_s)
+            except asyncio.TimeoutError:
+                # partial results are okay; caller will decide how to handle
                 pass
-        return {}  # Return empty dict, caller will handle missing data
 
     # Extract (iv, delta) tuples from Greeks objects
     results: Dict[str, Tuple[float, float]] = {}
@@ -1096,15 +1073,19 @@ async def scan(session: Session, tickers: List[str], pairs: List[Tuple[int, int]
                 exp_obj = exp_by_date[exp_date]
 
                 # Get ±35Δ strikes
-                delta_strikes = await get_double_calendar_strikes(
-                    session=session,
-                    expiration_obj=exp_obj,
-                    spot=spot,
-                    call_target_delta=0.35,
-                    put_target_delta=-0.35,
-                    delta_tolerance=delta_tolerance,
-                    timeout_s=timeout_s
-                )
+                try:
+                    delta_strikes = await get_double_calendar_strikes(
+                        session=session,
+                        expiration_obj=exp_obj,
+                        spot=spot,
+                        call_target_delta=0.35,
+                        put_target_delta=-0.35,
+                        delta_tolerance=delta_tolerance,
+                        timeout_s=timeout_s
+                    )
+                except Exception as e:
+                    logger.warning(f"Greeks streamer connection failed for {sym} {exp_date}: {e}. Skipping this expiration.")
+                    delta_strikes = {"call_35delta": None, "put_35delta": None}  # Both legs missing
 
                 # Store with expiration info
                 delta_choices[target] = {
@@ -1320,9 +1301,13 @@ async def scan(session: Session, tickers: List[str], pairs: List[Tuple[int, int]
                 exp_obj = exp_by_date[exp_date]
 
                 # Fetch Greeks for strikes around spot price (±25% range)
-                greeks_map = await snapshot_greeks_for_range(
-                    session, exp_obj, spot, range_pct=0.25, timeout_s=timeout_s
-                )
+                try:
+                    greeks_map = await snapshot_greeks_for_range(
+                        session, exp_obj, spot, range_pct=0.25, timeout_s=timeout_s
+                    )
+                except Exception as e:
+                    logger.warning(f"Greeks streamer connection failed for {sym} {exp_date}: {e}. Skipping this expiration.")
+                    greeks_map = {}  # Empty map - pick_atm_strike will fall back to nearest-spot
 
                 # Select ATM strike using delta-based selection (50Δ target)
                 # Falls back to nearest-spot if no Greeks available or no strikes within tolerance
@@ -1350,7 +1335,11 @@ async def scan(session: Session, tickers: List[str], pairs: List[Tuple[int, int]
             put_iv_source_by_target: Dict[int, str] = {}
 
             # Primary: Snapshot Greeks (to get IV and delta) for all ATM contracts
-            greek_map = await snapshot_greeks(session, streamer_syms, timeout_s=timeout_s)
+            try:
+                greek_map = await snapshot_greeks(session, streamer_syms, timeout_s=timeout_s)
+            except Exception as e:
+                logger.warning(f"Greeks streamer connection failed for {sym}: {e}. Falling back to X-earn IV.")
+                greek_map = {}  # Empty map - will fall back to X-earn IV
 
             for target, ch in choices.items():
                 call_iv = None

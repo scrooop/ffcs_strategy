@@ -300,6 +300,73 @@ async def snapshot_greeks(session: Session, streamer_symbols: List[str], timeout
 
     return results
 
+def validate_ff_inputs(iv_front: float, iv_back: float, dte_front: int, dte_back: int) -> Optional[str]:
+    """
+    Validate inputs for forward volatility calculation.
+
+    Checks for non-positive forward variance which would make FF calculation invalid.
+    This catches edge cases where IV_back^2 * T2 <= IV_front^2 * T1, which produces
+    negative or zero variance under the square root.
+
+    Args:
+        iv_front: Front expiration IV (decimal, e.g., 0.25 for 25%)
+        iv_back: Back expiration IV (decimal, e.g., 0.25 for 25%)
+        dte_front: Days to front expiration
+        dte_back: Days to back expiration
+
+    Returns:
+        None if inputs are valid
+        str: skip_reason if inputs are invalid
+
+    Formula check: IV_back^2 * T2 must be > IV_front^2 * T1
+    where T1 = dte_front/365, T2 = dte_back/365
+
+    Edge cases handled:
+        - Invalid IVs: negative, zero, NaN, infinity
+        - Invalid DTEs: zero, negative, or front >= back
+        - Non-positive forward variance: IV_back^2 * T2 <= IV_front^2 * T1
+
+    Example:
+        >>> validate_ff_inputs(0.30, 0.25, 30, 60)
+        None  # Valid inputs
+        >>> validate_ff_inputs(0.50, 0.25, 30, 60)
+        'Non-positive forward variance: IV_back^2 * T2 <= IV_front^2 * T1'
+    """
+    # Check for invalid IVs
+    if not (math.isfinite(iv_front) and math.isfinite(iv_back)):
+        return "Invalid IV: NaN or infinity detected"
+
+    if iv_front <= 0:
+        return "Invalid IV_front: must be positive"
+
+    if iv_back <= 0:
+        return "Invalid IV_back: must be positive"
+
+    # Check for invalid DTEs
+    if dte_front <= 0:
+        return "Invalid DTE_front: must be positive"
+
+    if dte_back <= 0:
+        return "Invalid DTE_back: must be positive"
+
+    if dte_back <= dte_front:
+        return "Invalid DTEs: back DTE must be > front DTE"
+
+    # Check for non-positive forward variance
+    # Forward variance = (IV_back^2 * T2 - IV_front^2 * T1) / (T2 - T1)
+    # For this to be positive, numerator must be positive:
+    # IV_back^2 * T2 > IV_front^2 * T1
+    T1 = dte_front / 365.0
+    T2 = dte_back / 365.0
+
+    variance_numerator = (iv_back ** 2) * T2 - (iv_front ** 2) * T1
+
+    if variance_numerator <= 0:
+        return "Non-positive forward variance: IV_back^2 * T2 <= IV_front^2 * T1"
+
+    return None  # All checks passed
+
+
 def forward_iv(iv_front: float, iv_back: float, dte_front: int, dte_back: int) -> Optional[float]:
     """
     Compute forward implied volatility between two expirations using variance decomposition.

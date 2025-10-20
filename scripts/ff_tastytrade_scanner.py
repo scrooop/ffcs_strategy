@@ -753,7 +753,7 @@ async def scan(session: Session, tickers: List[str], pairs: List[Tuple[int, int]
         earnings_data: Optional earnings data dict from EarningsCache (default None)
 
     Returns:
-        List of dict rows with 29-column unified CSV schema:
+        List of dict rows with 31-column unified CSV schema:
         - timestamp, symbol, structure
         - call_ff, put_ff, combined_ff (FF metrics - primary sort key)
         - spot_price, front_dte, back_dte, front_expiry, back_expiry
@@ -1401,7 +1401,7 @@ Examples:
         earnings_data=earnings_data
     ))
 
-    # Unified 29-column CSV schema
+    # Unified 31-column CSV schema
     cols = [
         "timestamp", "symbol", "structure",
         "call_ff", "put_ff", "combined_ff",

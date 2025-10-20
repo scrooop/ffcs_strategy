@@ -1,0 +1,436 @@
+# PRD: reopen issue of IV type
+
+- add flag --IV-ex-earn that overrides the default greeks-based IV and uses ex-earn IV instead
+
+
+# PRD improve-csv-output
+
+These columns:
+atm_strike	atm_delta	atm_ff	atm_iv_front	atm_iv_back	atm_fwd_iv	atm_iv_source_front	atm_iv_source_back
+are redundant and confusing since there are already these columns as well:
+call_strike	put_strike	call_delta	put_delta	call_ff	put_ff
+"atm" is always *EITHER* a call *OR* a put -- it can't be anything else.
+
+- Should these columns in the CSV be removed entirely?:
+min_ff	combined_ff
+
+- These columns are empty:
+call_fwd_iv	put_front_iv	put_back_iv	put_fwd_iv
+
+- Add --liquidity_rating argument so the user can set the minimum liquidity_rating threshold to something other than the default ≥ 3, e.g. "--liquidity_rating 2" sets the threshold to liquidity_rating ≥ 2.
+
+
+# PRD improve-terminal-output
+
+- print yfinance HTTP Error 404 messages gracefully/minimally
+- implement logging (tee)
+- make nice terminal output formatting (spacing, real-time progress percentage?)
+- print every symbol as it is processed?
+- clean up horrendous terminal output, e.g.:
+
+2025-10-20 02:45:43,720 - __main__ - WARNING - ABT 30DTE: Greeks IV missing for call, using ex-earn fallback
+2025-10-20 02:45:43,720 - __main__ - WARNING - ABT 30DTE: Greeks IV missing for put, using ex-earn fallback
+2025-10-20 02:45:43,720 - __main__ - WARNING - ABT 60DTE: Greeks IV missing for call, using ex-earn fallback
+2025-10-20 02:45:43,720 - __main__ - WARNING - ABT 60DTE: Greeks IV missing for put, using ex-earn fallback
+2025-10-20 02:45:43,720 - __main__ - WARNING - ABT 90DTE: Greeks IV missing for call, using ex-earn fallback
+2025-10-20 02:45:43,720 - __main__ - WARNING - ABT 90DTE: Greeks IV missing for put, using ex-earn fallback
+
+2025-10-20 02:36:23,117 - yfinance - ERROR - HTTP Error 404: {"quoteSummary":{"result":null,"error":{"code":"Not Found","description":"No fundamentals data found for symbol: JEPI"}}}
+2025-10-20 02:36:24,147 - yfinance - ERROR - JEPI: No earnings dates found, symbol may be delisted
+[INFO] JEPI: No earnings data available from any source (no earnings to avoid)
+2025-10-20 02:36:24,480 - yfinance - ERROR - HTTP Error 404: {"quoteSummary":{"result":null,"error":{"code":"Not Found","description":"Quote not found for symbol: PARA"}}}
+[INFO] PARA: Most recent earnings 2025-07-31 (81 days ago, from TastyTrade)
+Earnings pre-filter: 55 → 3 passed (52 filtered)
+  Cache hits: 53 | Fresh fetches: 2
+  Earnings check completed in 2.7s
+
+[FILTERED] FUL: Liquidity rating 2 < 3
+[FILTERED] GALT: Earnings on 2025-11-13 conflicts with back expiry 2026-01-16
+2025-10-20 04:44:41,817 - __main__ - INFO - GBCI: Liquidity rating 1 < 3
+[FILTERED] GBCI: Liquidity rating 1 < 3
+[WARN] Could not get market data for GEFB: No data present in response: {}, skipping.
+[WARN] Could not get market data for GOGL: No data present in response: {}, skipping.
+2025-10-20 04:44:43,637 - __main__ - INFO - GSBC: Liquidity rating 1 < 3
+[FILTERED] GSBC: Liquidity rating 1 < 3
+[WARN] Could not get market data for GTXI: No data present in response: {}, skipping.
+[WARN] Could not get market data for HEES: No data present in response: {}, skipping.
+[WARN] No option chain for HIFS, skipping.
+2025-10-20 04:44:46,044 - __main__ - INFO - HWC: Liquidity rating 2 < 3
+[FILTERED] HWC: Liquidity rating 2 < 3
+
+
+
+
+
+>....
+NRDY    NREF    NRGV    NRIM    NRIX    NSIT    NSP     NSSC    NTB     NTCT    NTGR    NTIC    NTLA
+NTST    NUS     NUVB    NUVL    NVAX    NVCR    NVEC    NVEE    NVRI    NVTS    NWBI    NWE     NWFL
+NWN     NWPX    NX      NXDT    NXRT    NXT     NYMT    OABI    OB      OBIO    OBK     OBT     OCFC
+OCGN    OCUL    ODC     ODP     OEC     OFG     OFIX    OFLX    OGS     OI      OII     OIS     OLMA
+OLO     OLP     OLPX    OMCL    OMER    OMI     ONB     ONEW    ONIT    ONL     ONTF    OOMA    OPAD
+OPCH    OPEN    OPFI    OPK     OPRX    ORA     ORC     ORGO    ORIC    ORN     ORRF    OSBC    OSCR
+OSIS    OSPN    OSUR    OSW     OTLK    OTTR    OUST    OUT     OVID    OVLY    OXM     PACB    PACK
+PACS    PAGS    PAHC    PAL     PAMT    PANL    PAR     PARR    PATK    PAX     PAYO    PAYS    PBF
+PBFS    PBH     PBI     PBPB    PBYI    PCB     PCH     PCRX    PCT     PCVX    PCYO    PD      PDCO
+PDFS    PDLB    PDLI    PDM     PEB     PEBK    PEBO    PECO    PENG    PEPG    PESI    PFBC    PFIS
+PFS     PFSI    PGC     PGEN    PGNY    PGRE    PGY     PHAT    PHIN    PHLT    PHR     PI      PINE
+PIPR    PJT     PKBK    PKE     PKOH    PKST    PL      PLAB    PLAY    PLBC    PLL     PLMR    PLOW
+PLPC    PLRX    PLSE    PLUG    PLUS    PLXS    PLYM    PMT     PMTS    PNRG    PNTG    POR     POWI
+POWL    POWW    PPBI    PPTA    PRA     PRAA    PRAX    PRCH    PRCT    PRDO    PRG     PRGS    PRIM
+PRK     PRKS    PRLB    PRLD    PRM     PRMB    PRME    PRO     PROK    PROP    PRPL    PRSU    PRTA
+PRTH    PRVA    PSFE    PSMT    PSTL    PTCT    PTEN    PTGX    PTLO    PTON    PUBM    PUMP    PVBC
+PWP     PX      PYXS    PZZA    QBTS    QCRH    QIPT    QLYS    QNST    QRHC    QSI     QTRX    QTTB
+QTWO    QUAD    QUIK    RAMP    RAPP    RAPT    RBB     RBBN    RBCAA   RC      RCEL    RCKT    RCKY
+RCUS    RDFN    RDN     RDNT    RDUS    RDVT    RDW     RDZN    REAL    REAX    REFI    REI     REKR
+RELL    RELY    RENB    REPL    REPX    RES     REVG    REX     REZI    RGCO    RGLS    RGNX    RGP
+RGR     RGTI    RHLD    RHP     RICK    RIG     RIGL    RILY    RIOT    RKLB    RLAY    RLGT    RLJ
+RM      RMAX    RMBL    RMBS    RMNI    RMR     RNA     RNAC    RNGR    RNST    ROAD    ROCK    ROG
+ROOT    RPAY    RPD     RRBI    RRR     RSI     RSVR    RUN     RUSHA   RUSHB   RVLV    RVMD    RWT
+RXO     RXRX    RXST    RXT     RYAM    RYI     RYTM    SABR    SAFE    SAFT    SAGE    SAH     SAMG
+SANA    SANM    SATS    SAVA    SB      SBCF    SBGI    SBH     SBRA    SBSI    SBT     SCHL    SCL
+SCLX    SCPH    SCS     SCSC    SCVL    SCWO    SD      SDGR    SDRL    SEAT    SEI     SEM     SEMR
+SENEA   SEPN    SERA    SES     SEVN    SEZL    SFBS    SFIX    SFL     SFM     SFNC    SFST    SG
+SGC     SGHC    SGHT    SGRY    SHAK    SHBI    SHEN    SHLS    SHO     SHOO    SHYF    SIBN    SIG
+SIGA    SIGI    SITC    SITM    SJW     SKIN    SKT     SKWD    SKY     SKYE    SKYH    SKYT    SKYW
+SLAB    SLDB    SLDP    SLG     SLND    SLNO    SLP     SLQT    SLRN    SLVM    SM      SMBC    SMBK
+SMHI    SMID    SMLR    SMMT    SMP     SMPL    SMR     SMRT    SMTC    SMTI    SMXT    SNBR    SNCY
+SNDA    SNDX    SNEX    SOC     SONO    SOUN    SPCE    SPFI    SPHR    SPIR    SPNS    SPNT    SPOK
+SPRY    SPSC    SPT     SPTN    SPXC    SR      SRCE    SRDX    SRI     SRRK    SSB     SSBK    SSP
+SSRM    SST     SSTI    SSTK    STAA    STBA    STC     STEL    STEM    STEP    STGW    STHO    STKL
+STKS    STNE    STNG    STOK    STR     STRA    STRL    STRO    STRS    STRW    STTK    STXS    SUNS
+SUPN    SVC     SVCO    SVRA    SVV     SWBI    SWI     SWIM    SWKH    SWTX    SWX     SXC     SXI
+SXT     SYBT    SYNA    SYRE    TALK    TALO    TARS    TAYD    TBBK    TBCH    TBI     TBPH    TCBI
+TCBK    TCBX    TCI     TCMD    TCRX    TCX     TDOC    TDS     TDUP    TDW     TE      TELO    TENB
+TERN    TEX     TFIN    TG      TGI     TGLS    TGNA    TGTX    TH      THFF    THR     THRD    THRM
+THRY    THS     TILE    TIPT    TITN    TK      TLS     TLYS    TMCI    TMDX    TMHC    TMP     TNC
+TNDM    TNET    TNGX    TNK     TNYA    TOWN    TPB     TPC     TPH     TPIC    TRAK    TRC     TRDA
+TREE    TRMK    TRML    TRN     TRNO    TRNS    TROX    TRS     TRST    TRTX    TRUE    TRUP    TRVI
+TSBK    TSHA    TSQ     TSVT    TTEC    TTGT    TTI     TTMI    TTSH    TUSK    TVTX    TWI     TWIN
+TWO     TWST    TXNM    TYRA    UBSI    UCB     UCTT    UDMY    UE      UEC     UFCS    UFPI    UFPT
+UHG     UHT     UIS     ULBI    ULCC    ULH     UMBF    UMH     UNF     UNFI    UNIT    UNTY    UP
+UPB     UPBD    UPST    UPWK    URBN    URG     URGN    USCB    USD     USLM    USNA    USPH    UTI
+UTL     UTMD    UTZ     UUUU    UVE     UVSP    UVV     VABK    VAL     VALU    VBTX    VC      VCEL
+VCSA    VCTR    VCYT    VECO    VEL     VERA    VERU    VERV    VERX    VGAS    VHI     VIAV    VICR
+VIR     VIRC    VITL    VLGEA   VLY     VMD     VMEO    VNDA    VPG     VRA     VRCA    VRDN    VRE
+VREX    VRNS    VRNT    VRRM    VRTS    VSAT    VSCO    VSEC    VSH     VSTM    VTLE    VTOL    VTS
+VTSI    VTYX    VVX     VYGR    VYX     WABC    WAFD    WALD    WASH    WAY     WBTN    WD      WDFC
+WEAV    WERN    WEST    WEYS    WGO     WGS     WHD     WINA    WK      WKC     WLDN    WLFC    WLLBW
+WLY     WMK     WNC     WNS     WOOF    WOR     WOW     WRBY    WRLD    WS      WSBC    WSBF    WSFS
+WSR     WT      WTBA    WTI     WTS     WTTR    WULF    WVE     WWW     XBIT    XERS    XFOR    XHR
+XMTR    XNCR    XOMA    XPEL    XPER    XPOF    XPRO    XRX     YELP    YEXT    YMAB    YORW    YOU
+ZBIO    ZD      ZETA    ZEUS    ZIMV    ZIP     ZNTL    ZSPC    ZUMZ    ZURA    ZVRA    ZWS     ZYME
+ZYXI \
+  --pairs 30-60 30-90 60-90 \
+  --min-ff 0.20 \
+  --structure both \
+  --csv-out "$(date +%y%m%d_%H%M)_ff_scan_RUSSEL2000.csv"
+2025-10-20 04:42:28,688 - yfinance - ERROR - HTTP Error 404: {"quoteSummary":{"result":null,"error":{"code":"Not Found","description":"No fundamentals data found for symbol: ACCD"}}}
+[INFO] ACCD: Most recent earnings 2025-04-24 (179 days ago, from TastyTrade)
+[INFO] ACRV: Most recent earnings 2025-08-14 (67 days ago), no upcoming date scheduled
+2025-10-20 04:42:30,804 - yfinance - ERROR - HTTP Error 404: {"quoteSummary":{"result":null,"error":{"code":"Not Found","description":"No fundamentals data found for symbol: AGS"}}}
+[INFO] AGS: Most recent earnings 2025-08-06 (75 days ago, from TastyTrade)
+2025-10-20 04:42:31,860 - yfinance - ERROR - HTTP Error 404: {"quoteSummary":{"result":null,"error":{"code":"Not Found","description":"Quote not found for symbol: AKYA"}}}
+[INFO] AKYA: Most recent earnings 2025-08-04 (77 days ago, from TastyTrade)
+2025-10-20 04:42:32,934 - yfinance - ERROR - HTTP Error 404: {"quoteSummary":{"result":null,"error":{"code":"Not Found","description":"No fundamentals data found for symbol: AMPS"}}}
+[INFO] AMPS: Most recent earnings 2025-05-08 (165 days ago, from TastyTrade)
+[INFO] ARL: Most recent earnings 2025-08-11 (70 days ago), no upcoming date scheduled
+[INFO] ARTV: Most recent earnings 2025-08-07 (74 days ago), no upcoming date scheduled
+[INFO] ATNM: Most recent earnings 2025-08-08 (73 days ago), no upcoming date scheduled
+[INFO] ATOS: Most recent earnings 2025-08-15 (66 days ago), no upcoming date scheduled
+2025-10-20 04:42:36,968 - yfinance - ERROR - HTTP Error 404: {"quoteSummary":{"result":null,"error":{"code":"Not Found","description":"No fundamentals data found for symbol: ATSG"}}}
+[INFO] ATSG: Most recent earnings 2025-05-05 (168 days ago, from TastyTrade)
+2025-10-20 04:42:38,201 - yfinance - ERROR - HTTP Error 404: {"quoteSummary":{"result":null,"error":{"code":"Not Found","description":"No fundamentals data found for symbol: AVTE"}}}
+[INFO] AVTE: Most recent earnings 2025-05-12 (161 days ago, from TastyTrade)
+[INFO] BBCP: Most recent earnings 2025-09-04 (46 days ago), no upcoming date scheduled
+2025-10-20 04:42:40,376 - yfinance - ERROR - BBUC: No earnings dates found, symbol may be delisted
+[INFO] BBUC: Most recent earnings 2025-08-21 (60 days ago), no upcoming date scheduled
+2025-10-20 04:42:40,677 - yfinance - ERROR - HTTP Error 404: {"quoteSummary":{"result":null,"error":{"code":"Not Found","description":"No fundamentals data found for symbol: BECN"}}}
+[INFO] BECN: Most recent earnings 2025-05-01 (172 days ago, from TastyTrade)
+2025-10-20 04:42:42,270 - yfinance - ERROR - HTTP Error 404: {"quoteSummary":{"result":null,"error":{"code":"Not Found","description":"Quote not found for symbol: BIGC"}}}
+[INFO] BIGC: Most recent earnings 2025-07-31 (81 days ago, from TastyTrade)
+2025-10-20 04:42:43,444 - yfinance - ERROR - HTTP Error 404: {"quoteSummary":{"result":null,"error":{"code":"Not Found","description":"No fundamentals data found for symbol: BLUE"}}}
+[INFO] BLUE: Most recent earnings 2024-11-19 (335 days ago, from TastyTrade)
+2025-10-20 04:42:44,756 - yfinance - ERROR - HTTP Error 404: {"quoteSummary":{"result":null,"error":{"code":"Not Found","description":"Quote not found for symbol: BPMC"}}}
+[INFO] BPMC: Most recent earnings 2025-08-07 (74 days ago, from TastyTrade)
+[INFO] CAMP: Most recent earnings 2025-08-12 (69 days ago), no upcoming date scheduled
+2025-10-20 04:42:46,874 - yfinance - ERROR - HTTP Error 404: {"quoteSummary":{"result":null,"error":{"code":"Not Found","description":"Quote not found for symbol: CHX"}}}
+[INFO] CHX: Most recent earnings 2025-07-23 (89 days ago, from TastyTrade)
+[INFO] CLYM: Most recent earnings 2025-08-14 (67 days ago), no upcoming date scheduled
+[INFO] CODI: Most recent earnings 2025-08-20 (61 days ago), no upcoming date scheduled
+2025-10-20 04:42:50,015 - yfinance - ERROR - HTTP Error 404: {"quoteSummary":{"result":null,"error":{"code":"Not Found","description":"No fundamentals data found for symbol: CSWI"}}}
+[INFO] CSWI: Most recent earnings 2025-07-30 (82 days ago, from TastyTrade)
+[INFO] CVGW: Most recent earnings 2025-09-09 (41 days ago), no upcoming date scheduled
+[INFO] DEC: Most recent earnings 2025-08-11 (70 days ago), no upcoming date scheduled
+2025-10-20 04:42:52,618 - yfinance - ERROR - HTTP Error 404: {"quoteSummary":{"result":null,"error":{"code":"Not Found","description":"No fundamentals data found for symbol: DESP"}}}
+[INFO] DESP: Most recent earnings 2025-05-15 (158 days ago, from TastyTrade)
+2025-10-20 04:42:53,818 - yfinance - ERROR - HTTP Error 404: {"quoteSummary":{"result":null,"error":{"code":"Not Found","description":"Quote not found for symbol: DTC"}}}
+[INFO] DTC: Most recent earnings 2025-08-06 (75 days ago, from TastyTrade)
+2025-10-20 04:42:55,011 - yfinance - ERROR - HTTP Error 404: {"quoteSummary":{"result":null,"error":{"code":"Not Found","description":"No fundamentals data found for symbol: EBTC"}}}
+[INFO] EBTC: Most recent earnings 2025-07-22 (90 days ago, from TastyTrade)
+2025-10-20 04:42:56,363 - yfinance - ERROR - HTTP Error 404: {"quoteSummary":{"result":null,"error":{"code":"Not Found","description":"Quote not found for symbol: ELEV"}}}
+[INFO] ELEV: Most recent earnings 2025-08-05 (76 days ago, from TastyTrade)
+2025-10-20 04:42:57,686 - yfinance - ERROR - HTTP Error 404: {"quoteSummary":{"result":null,"error":{"code":"Not Found","description":"No fundamentals data found for symbol: ENFN"}}}
+[INFO] ENFN: Most recent earnings 2025-05-08 (165 days ago, from TastyTrade)
+2025-10-20 04:42:58,864 - yfinance - ERROR - HTTP Error 404: {"quoteSummary":{"result":null,"error":{"code":"Not Found","description":"No fundamentals data found for symbol: ESGR"}}}
+[INFO] ESGR: Most recent earnings 2025-08-04 (77 days ago, from TastyTrade)
+2025-10-20 04:42:59,989 - yfinance - ERROR - HTTP Error 404: {"quoteSummary":{"result":null,"error":{"code":"Not Found","description":"Quote not found for symbol: ESSA"}}}
+[INFO] ESSA: Most recent earnings 2025-07-23 (89 days ago, from TastyTrade)
+2025-10-20 04:43:01,133 - yfinance - ERROR - HTTP Error 404: {"quoteSummary":{"result":null,"error":{"code":"Not Found","description":"Quote not found for symbol: ETWO"}}}
+[INFO] ETWO: Most recent earnings 2025-07-10 (102 days ago, from TastyTrade)
+2025-10-20 04:43:02,377 - yfinance - ERROR - HTTP Error 404: {"quoteSummary":{"result":null,"error":{"code":"Not Found","description":"No fundamentals data found for symbol: EVRI"}}}
+[INFO] EVRI: Most recent earnings 2025-08-06 (75 days ago, from TastyTrade)
+2025-10-20 04:43:03,551 - yfinance - ERROR - HTTP Error 404: {"quoteSummary":{"result":null,"error":{"code":"Not Found","description":"Quote not found for symbol: FARO"}}}
+[INFO] FARO: Most recent earnings 2025-08-14 (67 days ago, from TastyTrade)
+[INFO] FBLG: Most recent earnings 2025-08-14 (67 days ago), no upcoming date scheduled
+2025-10-20 04:43:05,426 - yfinance - ERROR - HTTP Error 404: {"quoteSummary":{"result":null,"error":{"code":"Not Found","description":"No fundamentals data found for symbol: FFNW"}}}
+[INFO] FFNW: Most recent earnings 2025-04-29 (174 days ago, from TastyTrade)
+2025-10-20 04:43:06,738 - yfinance - ERROR - HTTP Error 404: {"quoteSummary":{"result":null,"error":{"code":"Not Found","description":"No fundamentals data found for symbol: FLIC"}}}
+[INFO] FLIC: Most recent earnings 2025-07-24 (88 days ago, from TastyTrade)
+2025-10-20 04:43:08,073 - yfinance - ERROR - HTTP Error 404: {"quoteSummary":{"result":null,"error":{"code":"Not Found","description":"No fundamentals data found for symbol: FNA"}}}
+[INFO] FNA: Most recent earnings 2025-05-14 (159 days ago, from TastyTrade)
+[INFO] GALT: Most recent earnings 2025-08-15 (66 days ago), no upcoming date scheduled
+[INFO] GOGL: Most recent earnings 2025-08-26 (55 days ago), no upcoming date scheduled
+2025-10-20 04:43:10,962 - yfinance - ERROR - HTTP Error 404: {"quoteSummary":{"result":null,"error":{"code":"Not Found","description":"No fundamentals data found for symbol: HEES"}}}
+[INFO] HEES: Most recent earnings 2025-04-29 (174 days ago, from TastyTrade)
+2025-10-20 04:43:12,096 - yfinance - ERROR - HTTP Error 404: {"quoteSummary":{"result":null,"error":{"code":"Not Found","description":"Quote not found for symbol: IGMS"}}}
+[INFO] IGMS: Most recent earnings 2025-08-13 (68 days ago, from TastyTrade)
+2025-10-20 04:43:13,112 - yfinance - ERROR - HTTP Error 404: {"quoteSummary":{"result":null,"error":{"code":"Not Found","description":"No fundamentals data found for symbol: IGT"}}}
+[INFO] IGT: Most recent earnings 2025-07-29 (83 days ago, from TastyTrade)
+[INFO] IMMR: Most recent earnings 2025-09-16 (34 days ago), no upcoming date scheduled
+2025-10-20 04:43:14,790 - yfinance - ERROR - HTTP Error 404: {"quoteSummary":{"result":null,"error":{"code":"Not Found","description":"No fundamentals data found for symbol: INZY"}}}
+[INFO] INZY: Most recent earnings 2025-08-05 (76 days ago, from TastyTrade)
+2025-10-20 04:43:16,054 - yfinance - ERROR - HTTP Error 404: {"quoteSummary":{"result":null,"error":{"code":"Not Found","description":"Quote not found for symbol: KIND"}}}
+[INFO] KIND: Most recent earnings 2025-08-07 (74 days ago, from TastyTrade)
+2025-10-20 04:43:17,183 - yfinance - ERROR - HTTP Error 404: {"quoteSummary":{"result":null,"error":{"code":"Not Found","description":"No fundamentals data found for symbol: LANC"}}}
+[INFO] LANC: Most recent earnings 2025-04-30 (173 days ago, from TastyTrade)
+2025-10-20 04:43:18,318 - yfinance - ERROR - HTTP Error 404: {"quoteSummary":{"result":null,"error":{"code":"Not Found","description":"Quote not found for symbol: LGFA"}}}
+2025-10-20 04:43:19,045 - yfinance - ERROR - LGFA: No earnings dates found, symbol may be delisted
+[INFO] LGFA: Most recent earnings 2025-05-22 (151 days ago, from TastyTrade)
+2025-10-20 04:43:19,304 - yfinance - ERROR - HTTP Error 404: {"quoteSummary":{"result":null,"error":{"code":"Not Found","description":"No fundamentals data found for symbol: LGTY"}}}
+[INFO] LGTY: Most recent earnings 2025-02-20 (242 days ago, from TastyTrade)
+2025-10-20 04:43:20,556 - yfinance - ERROR - HTTP Error 404: {"quoteSummary":{"result":null,"error":{"code":"Not Found","description":"No fundamentals data found for symbol: LSEA"}}}
+[INFO] LSEA: Most recent earnings 2025-08-07 (74 days ago, from TastyTrade)
+[INFO] LYRA: Most recent earnings 2025-08-18 (63 days ago), no upcoming date scheduled
+[INFO] LZM: Most recent earnings 2025-08-20 (61 days ago), no upcoming date scheduled
+2025-10-20 04:43:25,600 - yfinance - ERROR - METCB: No earnings dates found, symbol may be delisted
+[INFO] METCB: Most recent earnings 2025-08-11 (70 days ago), no upcoming date scheduled
+[INFO] MGX: Most recent earnings 2025-08-13 (68 days ago), no upcoming date scheduled
+2025-10-20 04:43:26,573 - yfinance - ERROR - HTTP Error 404: {"quoteSummary":{"result":null,"error":{"code":"Not Found","description":"No fundamentals data found for symbol: MHLD"}}}
+[INFO] MHLD: Most recent earnings 2025-05-08 (165 days ago, from TastyTrade)
+2025-10-20 04:43:28,514 - yfinance - ERROR - HTTP Error 404: {"quoteSummary":{"result":null,"error":{"code":"Not Found","description":"No fundamentals data found for symbol: ML"}}}
+[INFO] ML: Most recent earnings 2025-05-06 (167 days ago, from TastyTrade)
+[INFO] MODV: Most recent earnings 2025-08-26 (55 days ago), no upcoming date scheduled
+2025-10-20 04:43:30,616 - yfinance - ERROR - HTTP Error 404: {"quoteSummary":{"result":null,"error":{"code":"Not Found","description":"No fundamentals data found for symbol: NOVA"}}}
+[INFO] NOVA: Most recent earnings 2025-06-11 (131 days ago, from TastyTrade)
+2025-10-20 04:43:32,370 - yfinance - ERROR - HTTP Error 404: {"quoteSummary":{"result":null,"error":{"code":"Not Found","description":"Quote not found for symbol: NVEE"}}}
+[INFO] NVEE: Most recent earnings 2025-08-06 (75 days ago, from TastyTrade)
+2025-10-20 04:43:33,857 - yfinance - ERROR - HTTP Error 404: {"quoteSummary":{"result":null,"error":{"code":"Not Found","description":"No fundamentals data found for symbol: OB"}}}
+[INFO] OB: Most recent earnings 2025-05-09 (164 days ago, from TastyTrade)
+[INFO] PAMT: Most recent earnings 2025-08-07 (74 days ago), no upcoming date scheduled
+2025-10-20 04:43:35,964 - yfinance - ERROR - HTTP Error 404: {"quoteSummary":{"result":null,"error":{"code":"Not Found","description":"No fundamentals data found for symbol: PDCO"}}}
+[INFO] PDCO: Most recent earnings 2025-02-26 (236 days ago, from TastyTrade)
+2025-10-20 04:43:37,351 - yfinance - ERROR - HTTP Error 404: {"quoteSummary":{"result":null,"error":{"code":"Not Found","description":"No fundamentals data found for symbol: RDFN"}}}
+[INFO] RDFN: Most recent earnings 2025-08-05 (76 days ago, from TastyTrade)
+2025-10-20 04:43:38,569 - yfinance - ERROR - HTTP Error 404: {"quoteSummary":{"result":null,"error":{"code":"Not Found","description":"Quote not found for symbol: RDUS"}}}
+[INFO] RDUS: Most recent earnings 2025-07-01 (111 days ago, from TastyTrade)
+2025-10-20 04:43:39,990 - yfinance - ERROR - HTTP Error 404: {"quoteSummary":{"result":null,"error":{"code":"Not Found","description":"No fundamentals data found for symbol: RGLS"}}}
+[INFO] RGLS: Most recent earnings 2025-08-14 (67 days ago, from TastyTrade)
+[INFO] RILY: Most recent earnings 2025-08-13 (68 days ago, from TastyTrade)
+2025-10-20 04:43:42,131 - yfinance - ERROR - HTTP Error 404: {"quoteSummary":{"result":null,"error":{"code":"Not Found","description":"Quote not found for symbol: RMBL"}}}
+[INFO] RMBL: Most recent earnings 2025-08-11 (70 days ago, from TastyTrade)
+2025-10-20 04:43:43,251 - yfinance - ERROR - HTTP Error 404: {"quoteSummary":{"result":null,"error":{"code":"Not Found","description":"Quote not found for symbol: SAGE"}}}
+[INFO] SAGE: Most recent earnings 2025-07-30 (82 days ago, from TastyTrade)
+2025-10-20 04:43:44,645 - yfinance - ERROR - HTTP Error 404: {"quoteSummary":{"result":null,"error":{"code":"Not Found","description":"No fundamentals data found for symbol: SBT"}}}
+[INFO] SBT: Most recent earnings 2025-04-23 (180 days ago, from TastyTrade)
+2025-10-20 04:43:45,860 - yfinance - ERROR - HTTP Error 404: {"quoteSummary":{"result":null,"error":{"code":"Not Found","description":"No fundamentals data found for symbol: SHYF"}}}
+[INFO] SHYF: Most recent earnings 2025-07-24 (88 days ago, from TastyTrade)
+2025-10-20 04:43:47,069 - yfinance - ERROR - HTTP Error 404: {"quoteSummary":{"result":null,"error":{"code":"Not Found","description":"No fundamentals data found for symbol: SJW"}}}
+[INFO] SJW: Most recent earnings 2025-04-28 (175 days ago, from TastyTrade)
+2025-10-20 04:43:48,460 - yfinance - ERROR - HTTP Error 404: {"quoteSummary":{"result":null,"error":{"code":"Not Found","description":"No fundamentals data found for symbol: SLRN"}}}
+[INFO] SLRN: Most recent earnings 2025-05-13 (160 days ago, from TastyTrade)
+2025-10-20 04:43:49,696 - yfinance - ERROR - HTTP Error 404: {"quoteSummary":{"result":null,"error":{"code":"Not Found","description":"No fundamentals data found for symbol: SSBK"}}}
+[INFO] SSBK: Most recent earnings 2025-07-28 (84 days ago, from TastyTrade)
+[INFO] STRO: Most recent earnings 2025-08-15 (66 days ago), no upcoming date scheduled
+2025-10-20 04:43:51,619 - yfinance - ERROR - HTTP Error 404: {"quoteSummary":{"result":null,"error":{"code":"Not Found","description":"No fundamentals data found for symbol: SWI"}}}
+[INFO] SWI: Most recent earnings 2025-05-01 (172 days ago, from TastyTrade)
+2025-10-20 04:43:52,779 - yfinance - ERROR - HTTP Error 404: {"quoteSummary":{"result":null,"error":{"code":"Not Found","description":"No fundamentals data found for symbol: SWTX"}}}
+[INFO] SWTX: Most recent earnings 2025-08-06 (75 days ago, from TastyTrade)
+[INFO] TAYD: Most recent earnings 2025-08-18 (63 days ago), no upcoming date scheduled
+2025-10-20 04:43:55,104 - yfinance - ERROR - TCI: No earnings dates found, symbol may be delisted
+[INFO] TCI: Most recent earnings 2025-08-11 (70 days ago), no upcoming date scheduled
+[INFO] TELO: Most recent earnings 2025-08-15 (66 days ago), no upcoming date scheduled
+2025-10-20 04:43:55,856 - yfinance - ERROR - HTTP Error 404: {"quoteSummary":{"result":null,"error":{"code":"Not Found","description":"Quote not found for symbol: TGI"}}}
+[INFO] TGI: Most recent earnings 2025-08-06 (75 days ago, from TastyTrade)
+2025-10-20 04:43:57,153 - yfinance - ERROR - HTTP Error 404: {"quoteSummary":{"result":null,"error":{"code":"Not Found","description":"Quote not found for symbol: THRD"}}}
+[INFO] THRD: Most recent earnings 2025-08-14 (67 days ago, from TastyTrade)
+2025-10-20 04:43:58,407 - yfinance - ERROR - HTTP Error 404: {"quoteSummary":{"result":null,"error":{"code":"Not Found","description":"No fundamentals data found for symbol: TSVT"}}}
+[INFO] TSVT: Most recent earnings 2025-05-14 (159 days ago, from TastyTrade)
+[INFO] VALU: Most recent earnings 2025-07-28 (84 days ago), no upcoming date scheduled
+2025-10-20 04:44:00,884 - yfinance - ERROR - HTTP Error 404: {"quoteSummary":{"result":null,"error":{"code":"Not Found","description":"No fundamentals data found for symbol: VCSA"}}}
+[INFO] VCSA: Most recent earnings 2025-05-08 (165 days ago, from TastyTrade)
+2025-10-20 04:44:01,971 - yfinance - ERROR - HTTP Error 404: {"quoteSummary":{"result":null,"error":{"code":"Not Found","description":"Quote not found for symbol: VERV"}}}
+[INFO] VERV: Most recent earnings 2025-08-14 (67 days ago, from TastyTrade)
+[INFO] XBIT: Most recent earnings 2025-08-15 (66 days ago), no upcoming date scheduled
+Earnings pre-filter: 1949 → 125 passed (1824 filtered)
+  Cache hits: 1863 | Fresh fetches: 86
+  Earnings check completed in 95.4s
+[WARN] Could not get market data for ACCD: No data present in response: {}, skipping.
+[WARN] No option chain for ACRV, skipping.
+[WARN] Could not get market data for ADRO: No data present in response: {}, skipping.
+[WARN] No option chain for AFRI, skipping.
+[WARN] Could not get market data for AGS: No data present in response: {}, skipping.
+[WARN] Could not get market data for AKYA: No data present in response: {}, skipping.
+[WARN] Could not get market data for AMPS: No data present in response: {}, skipping.
+[WARN] No option chain for ARL, skipping.
+[WARN] No option chain for ARTV, skipping.
+[FILTERED] ATOS: Earnings on 2025-11-11 conflicts with back expiry 2026-01-16
+[WARN] Could not get market data for ATSG: No data present in response: {}, skipping.
+[WARN] Could not get market data for AVTE: No data present in response: {}, skipping.
+2025-10-20 04:44:15,547 - __main__ - INFO - BANF: Liquidity rating 1 < 3
+[FILTERED] BANF: Liquidity rating 1 < 3
+2025-10-20 04:44:16,171 - __main__ - INFO - BANR: Liquidity rating 2 < 3
+[FILTERED] BANR: Liquidity rating 2 < 3
+2025-10-20 04:44:16,803 - __main__ - INFO - BBCP: Liquidity rating 2 < 3
+[FILTERED] BBCP: Liquidity rating 2 < 3
+[WARN] BBUC: Earnings data unavailable, skipping earnings check
+2025-10-20 04:44:17,446 - __main__ - INFO - BBUC: Liquidity rating 1 < 3
+[FILTERED] BBUC: Liquidity rating 1 < 3
+[WARN] Could not get market data for BECN: No data present in response: {}, skipping.
+[WARN] Could not get market data for BIGC: No data present in response: {}, skipping.
+[WARN] Could not get market data for BLUE: No data present in response: {}, skipping.
+2025-10-20 04:44:19,854 - __main__ - INFO - BPMC: Liquidity rating 0 < 3
+[FILTERED] BPMC: Liquidity rating 0 < 3
+[WARN] No option chain for BSVN, skipping.
+[WARN] No option chain for CAMP, skipping.
+[WARN] Could not get market data for CHX: No data present in response: {}, skipping.
+[WARN] No option chain for CLSKW, skipping.
+[WARN] No option chain for CLYM, skipping.
+2025-10-20 04:44:26,734 - __main__ - INFO - CNS: Liquidity rating 2 < 3
+[FILTERED] CNS: Liquidity rating 2 < 3
+[FILTERED] CODI: Earnings on 2025-10-29 conflicts with back expiry 2026-01-16
+[WARN] Could not get market data for CRDA: No data present in response: {}, skipping.
+[WARN] Could not get market data for CSWI: No data present in response: {}, skipping.
+2025-10-20 04:44:29,158 - __main__ - INFO - CVGW: Liquidity rating 2 < 3
+[FILTERED] CVGW: Liquidity rating 2 < 3
+2025-10-20 04:44:29,771 - __main__ - INFO - CWBC: Liquidity rating 1 < 3
+[FILTERED] CWBC: Liquidity rating 1 < 3
+[WARN] No option chain for DEC, skipping.
+[WARN] Could not get market data for DESP: No data present in response: {}, skipping.
+[WARN] Could not get market data for DTC: No data present in response: {}, skipping.
+[WARN] Could not get market data for EBTC: No data present in response: {}, skipping.
+[WARN] Could not get market data for ELEV: No data present in response: {}, skipping.
+[WARN] Could not get market data for ENFN: No data present in response: {}, skipping.
+2025-10-20 04:44:33,967 - __main__ - INFO - EQBK: Liquidity rating 1 < 3
+[FILTERED] EQBK: Liquidity rating 1 < 3
+[WARN] No quote for ESGR, skipping.
+[WARN] Could not get market data for ESSA: No data present in response: {}, skipping.
+[WARN] Could not get market data for ETWO: No data present in response: {}, skipping.
+[WARN] Could not get market data for EVRI: No data present in response: {}, skipping.
+[WARN] Could not get market data for FARO: No data present in response: {}, skipping.
+2025-10-20 04:44:37,497 - __main__ - INFO - FBK: Liquidity rating 1 < 3
+[FILTERED] FBK: Liquidity rating 1 < 3
+[WARN] No option chain for FBLG, skipping.
+[WARN] Could not get market data for FFNW: No data present in response: {}, skipping.
+[WARN] Could not get market data for FLIC: No data present in response: {}, skipping.
+[WARN] Could not get market data for FNA: No data present in response: {}, skipping.
+2025-10-20 04:44:40,564 - __main__ - INFO - FUL: Liquidity rating 2 < 3
+[FILTERED] FUL: Liquidity rating 2 < 3
+[FILTERED] GALT: Earnings on 2025-11-13 conflicts with back expiry 2026-01-16
+2025-10-20 04:44:41,817 - __main__ - INFO - GBCI: Liquidity rating 1 < 3
+[FILTERED] GBCI: Liquidity rating 1 < 3
+[WARN] Could not get market data for GEFB: No data present in response: {}, skipping.
+[WARN] Could not get market data for GOGL: No data present in response: {}, skipping.
+2025-10-20 04:44:43,637 - __main__ - INFO - GSBC: Liquidity rating 1 < 3
+[FILTERED] GSBC: Liquidity rating 1 < 3
+[WARN] Could not get market data for GTXI: No data present in response: {}, skipping.
+[WARN] Could not get market data for HEES: No data present in response: {}, skipping.
+[WARN] No option chain for HIFS, skipping.
+2025-10-20 04:44:46,044 - __main__ - INFO - HWC: Liquidity rating 2 < 3
+[FILTERED] HWC: Liquidity rating 2 < 3
+[WARN] Could not get market data for IGMS: No data present in response: {}, skipping.
+[WARN] Could not get market data for IGT: No data present in response: {}, skipping.
+[WARN] Could not get market data for INH: No data present in response: {}, skipping.
+[WARN] Could not get market data for INZY: No data present in response: {}, skipping.
+[WARN] Could not get market data for KIND: No data present in response: {}, skipping.
+[WARN] Could not get market data for LANC: No data present in response: {}, skipping.
+[WARN] Could not get market data for LGFA: No data present in response: {}, skipping.
+[WARN] Could not get market data for LGFB: No data present in response: {}, skipping.
+[WARN] Could not get market data for LGTY: No data present in response: {}, skipping.
+[WARN] Could not get market data for LSEA: No data present in response: {}, skipping.
+[FILTERED] LYRA: Earnings on 2025-11-11 conflicts with back expiry 2026-01-16
+2025-10-20 04:45:04,162 - __main__ - INFO - LZM: Liquidity rating 2 < 3
+[FILTERED] LZM: Liquidity rating 2 < 3
+2025-10-20 04:45:04,778 - __main__ - INFO - MCBS: Liquidity rating 1 < 3
+[FILTERED] MCBS: Liquidity rating 1 < 3
+[WARN] No option chain for METCB, skipping.
+[WARN] Could not get market data for METCV: No data present in response: {}, skipping.
+[WARN] No option chain for MGX, skipping.
+[WARN] Could not get market data for MHLD: No data present in response: {}, skipping.
+[WARN] Could not get market data for ML: No data present in response: {}, skipping.
+[WARN] Could not get market data for MODV: No data present in response: {}, skipping.
+[WARN] Could not get market data for MSFUT: No data present in response: {}, skipping.
+[WARN] Could not get market data for NOVA: No data present in response: {}, skipping.
+2025-10-20 04:45:13,363 - __main__ - INFO - NRIX: Liquidity rating 2 < 3
+[FILTERED] NRIX: Liquidity rating 2 < 3
+[WARN] Could not get market data for NVEE: No data present in response: {}, skipping.
+[WARN] Could not get market data for OB: No data present in response: {}, skipping.
+[WARN] No option chain for PAMT, skipping.
+[WARN] Could not get market data for PDCO: No data present in response: {}, skipping.
+[WARN] Could not get market data for PDLI: No data present in response: {}, skipping.
+2025-10-20 04:45:23,452 - __main__ - INFO - RBCAA: Liquidity rating 2 < 3
+[FILTERED] RBCAA: Liquidity rating 2 < 3
+[WARN] Could not get market data for RDFN: No data present in response: {}, skipping.
+[WARN] Could not get market data for RDUS: No data present in response: {}, skipping.
+[WARN] Could not get market data for RGLS: No data present in response: {}, skipping.
+[WARN] Could not get market data for RMBL: No data present in response: {}, skipping.
+2025-10-20 04:45:30,655 - __main__ - INFO - SAGE: Liquidity rating 0 < 3
+[FILTERED] SAGE: Liquidity rating 0 < 3
+[WARN] Could not get market data for SBT: No data present in response: {}, skipping.
+2025-10-20 04:45:31,875 - __main__ - INFO - SFNC: Liquidity rating 2 < 3
+[FILTERED] SFNC: Liquidity rating 2 < 3
+[WARN] Could not get market data for SHYF: No data present in response: {}, skipping.
+[WARN] Could not get market data for SJW: No data present in response: {}, skipping.
+[WARN] Could not get market data for SLRN: No data present in response: {}, skipping.
+[WARN] Could not get market data for SSBK: No data present in response: {}, skipping.
+[WARN] Could not get market data for SWI: No data present in response: {}, skipping.
+[WARN] Could not get market data for SWTX: No data present in response: {}, skipping.
+[WARN] No option chain for TAYD, skipping.
+[WARN] No option chain for TCI, skipping.
+[WARN] No option chain for TELO, skipping.
+2025-10-20 04:45:44,367 - __main__ - INFO - TFIN: Liquidity rating 2 < 3
+[FILTERED] TFIN: Liquidity rating 2 < 3
+[WARN] Could not get market data for TGI: No data present in response: {}, skipping.
+Traceback (most recent call last):
+  File "/Users/wnv/cc/personal_finance/ffcs_strategy/scripts/ff_tastytrade_scanner.py", line 1907, in <module>
+    main()
+    ~~~~^^
+  File "/Users/wnv/cc/personal_finance/ffcs_strategy/scripts/ff_tastytrade_scanner.py", line 1831, in main
+    rows, skip_stats, scanned, passed = asyncio.run(scan(
+                                        ~~~~~~~~~~~^^^^^^
+        session, tickers, pairs, args.min_ff, args.dte_tolerance, args.timeout,
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    ...<7 lines>...
+        earnings_data=earnings_data
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    ))
+    ^^
+  File "/opt/homebrew/Cellar/python@3.14/3.14.0/Frameworks/Python.framework/Versions/3.14/lib/python3.14/asyncio/runners.py", line 204, in run
+    return runner.run(main)
+           ~~~~~~~~~~^^^^^^
+  File "/opt/homebrew/Cellar/python@3.14/3.14.0/Frameworks/Python.framework/Versions/3.14/lib/python3.14/asyncio/runners.py", line 127, in run
+    return self._loop.run_until_complete(task)
+           ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^^^^^^
+  File "/opt/homebrew/Cellar/python@3.14/3.14.0/Frameworks/Python.framework/Versions/3.14/lib/python3.14/asyncio/base_events.py", line 719, in run_until_complete
+    return future.result()
+           ~~~~~~~~~~~~~^^
+  File "/Users/wnv/cc/personal_finance/ffcs_strategy/scripts/ff_tastytrade_scanner.py", line 1119, in scan
+    chain_list = NestedOptionChain.get(session, sym)
+  File "/Users/wnv/cc/personal_finance/ffcs_strategy/venv/lib/python3.14/site-packages/tastytrade/instruments.py", line 738, in get
+    return [cls(**item) for item in data["items"]]
+            ~~~^^^^^^^^
+  File "/Users/wnv/cc/personal_finance/ffcs_strategy/venv/lib/python3.14/site-packages/pydantic/main.py", line 250, in __init__
+    validated_self = self.__pydantic_validator__.validate_python(data, self_instance=self)
+pydantic_core._pydantic_core.ValidationError: 1 validation error for NestedOptionChain
+expirations.1.strikes
+  Field required [type=missing, input_value={'expiration-type': 'Regu...'settlement-type': 'PM'}, input_type=dict]
+    For further information visit https://errors.pydantic.dev/2.12/v/missing

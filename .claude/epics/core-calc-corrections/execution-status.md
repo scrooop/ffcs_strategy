@@ -1,7 +1,7 @@
 ---
 started: 2025-10-20T05:13:56Z
 branch: epic/core-calc-corrections
-updated: 2025-10-20T05:20:15Z
+updated: 2025-10-20T05:25:00Z
 ---
 
 # Execution Status
@@ -24,15 +24,25 @@ updated: 2025-10-20T05:20:15Z
   - Created: `tests/test_ff_calculations.py`
 - **GitHub:** https://github.com/scrooop/ffcs_strategy/issues/23
 
+### Issue #25: Implement Skip Tracking & Logging
+- **Status:** COMPLETE
+- **Completed:** 2025-10-20T05:25:00Z
+- **Agent:** general-purpose
+- **Duration:** ~5 minutes
+- **Commits:** 2 (a10def9, bfc2166)
+- **Deliverables:**
+  - Added `skip_reason` column to CSV (32 columns total)
+  - Integrated `validate_ff_inputs()` calls at skip points
+  - Added 10 skip reason constants
+  - Implemented skip statistics tracking
+  - Added summary output with breakdown
+- **Files:**
+  - Modified: `scripts/ff_tastytrade_scanner.py`
+- **GitHub:** https://github.com/scrooop/ffcs_strategy/issues/25
+
 ## Active Agents 🔄
 
-### Issue #25: Implement Skip Tracking & Logging
-- **Status:** STARTING
-- **Agent:** general-purpose
-- **Started:** 2025-10-20T05:20:15Z
-- **Dependencies:** #23 ✅ (complete)
-- **Estimated:** 2-3 hours
-- **GitHub:** https://github.com/scrooop/ffcs_strategy/issues/25
+(Preparing to launch parallel batch)
 
 ## Ready to Start (After #25)
 
@@ -66,20 +76,20 @@ updated: 2025-10-20T05:20:15Z
 ## Progress Summary
 
 **Total tasks:** 10
-**Completed:** 1 (10%)
-**In progress:** 1 (10%)
-**Ready:** 0 (waiting for #25)
-**Blocked:** 8 (80%)
+**Completed:** 2 (20%)
+**In progress:** 0 (preparing parallel batch)
+**Ready:** 4 (launching now: #26, #28, #29, #32)
+**Blocked:** 4 (40%)
 
 ## Dependency Chain Visualization
 
 ```
-✅ #23 (Validation) → 🔄 #25 (Skip Tracking)
+✅ #23 (Validation) → ✅ #25 (Skip Tracking)
                                 ↓
-                                ├─→ ⏸ #28 (ATM 50Δ) → ⏸ #31 (ATM FF) ──┐
-                                ├─→ ⏸ #26 (Double Min-Gate) ─────────────┤
-                                ├─→ ⏸ #29 (IV Priority) ──────────────────┤
-                                └─→ ⏸ #32 (Volume Filter) ────────────────┤
+                                ├─→ 🔄 #28 (ATM 50Δ) → ⏸ #31 (ATM FF) ──┐
+                                ├─→ 🔄 #26 (Double Min-Gate) ─────────────┤
+                                ├─→ 🔄 #29 (IV Priority) ──────────────────┤
+                                └─→ 🔄 #32 (Volume Filter) ────────────────┤
                                                                           ↓
 Integration:                                                    ⏸ #24 (CSV) → ⏸ #27 (Docs)
                                                                                       ↓
@@ -88,8 +98,8 @@ Validation:                                                                     
 
 ## Next Actions
 
-1. **Complete Issue #25** (in progress)
-2. **Launch parallel batch** after #25 completes:
+1. ✅ **Complete Issue #25** (DONE)
+2. 🔄 **Launch parallel batch** (IN PROGRESS):
    - Simultaneously start #26, #29, #32 (parallel agents)
    - Start #28 (sequential track)
 3. **Monitor for completion** and cascade to next dependencies

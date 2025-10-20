@@ -1234,42 +1234,51 @@ async def scan(session: Session, tickers: List[str], pairs: List[Tuple[int, int]
                 if min_ff_double >= min_ff or show_all_scans:
                     passed += 1
                     rows.append({
+                        # Common (8)
                         "timestamp": timestamp,
                         "symbol": sym,
                         "structure": "double",
-                        "call_ff": round(ff_call, 6),
-                        "put_ff": round(ff_put, 6),
-                        "combined_ff": round(combined_ff, 6),
-                        "min_ff": round(min_ff_double, 6),
-                        "atm_ff": "",  # Not used for double structure
-                        "atm_delta": "",  # Not used for double structure
-                        "atm_iv_front": "",  # Not used for double structure
-                        "atm_iv_back": "",  # Not used for double structure
-                        "atm_fwd_iv": "",  # Not used for double structure
                         "spot_price": f"{spot:.2f}",
                         "front_dte": front_choice["dte"],
                         "back_dte": back_choice["dte"],
                         "front_expiry": front_choice["expiration"].isoformat(),
                         "back_expiry": back_choice["expiration"].isoformat(),
+                        # ATM-specific (8) - empty for double structure
                         "atm_strike": "",
+                        "atm_delta": "",
+                        "atm_ff": "",
+                        "atm_iv_front": "",
+                        "atm_iv_back": "",
+                        "atm_fwd_iv": "",
+                        "atm_iv_source_front": "",
+                        "atm_iv_source_back": "",
+                        # Double-specific (8) - populated for double structure
                         "call_strike": f"{front_call.strike:.2f}",
                         "put_strike": f"{front_put.strike:.2f}",
                         "call_delta": round(front_call.actual_delta, 4),
                         "put_delta": round(front_put.actual_delta, 4),
+                        "call_ff": round(ff_call, 6),
+                        "put_ff": round(ff_put, 6),
+                        "min_ff": round(min_ff_double, 6),
+                        "combined_ff": round(combined_ff, 6),
+                        # IV detail (6)
                         "call_front_iv": round(front_call_iv, 6),
                         "call_back_iv": round(back_call_iv, 6),
                         "call_fwd_iv": round(fwd_call, 6),
                         "put_front_iv": round(front_put_iv, 6),
                         "put_back_iv": round(back_put_iv, 6),
                         "put_fwd_iv": round(fwd_put, 6),
-                        "earnings_conflict": "no" if not earnings_date else "",
-                        "earnings_date": earnings_date.isoformat() if earnings_date else "",
-                        "avg_options_volume": f"{avg_volume:.2f}" if avg_volume is not None else "",
+                        # IV sources - double (4)
                         "iv_source_call_front": call_iv_source_front,
                         "iv_source_call_back": call_iv_source_back,
                         "iv_source_put_front": put_iv_source_front,
                         "iv_source_put_back": put_iv_source_back,
+                        # Quality filters (4)
+                        "earnings_conflict": "no" if not earnings_date else "",
+                        "earnings_date": earnings_date.isoformat() if earnings_date else "",
+                        "avg_options_volume_20d": f"{avg_volume:.2f}" if avg_volume is not None else "",
                         "earnings_source": earnings_source,
+                        # Tracking (1)
                         "skip_reason": ""
                     })
 
@@ -1401,52 +1410,66 @@ async def scan(session: Session, tickers: List[str], pairs: List[Tuple[int, int]
 
                 atm_ff = (atm_iv_front - atm_fwd_iv) / atm_fwd_iv
 
-                # Determine IV sources
+                # Determine IV sources for both call and put
                 call_iv_src_front = call_iv_source_by_target.get(front, "greeks")
                 call_iv_src_back = call_iv_source_by_target.get(back, "greeks")
                 put_iv_src_front = put_iv_source_by_target.get(front, "greeks")
                 put_iv_src_back = put_iv_source_by_target.get(back, "greeks")
 
+                # ATM IV sources: Use call source if both match, otherwise indicate "mixed"
+                # In practice, they should match since we use the same strike
+                atm_iv_src_front = call_iv_src_front if call_iv_src_front == put_iv_src_front else "mixed"
+                atm_iv_src_back = call_iv_src_back if call_iv_src_back == put_iv_src_back else "mixed"
+
                 # Include result if: (1) meets FF threshold, OR (2) show_all_scans is enabled
                 if atm_ff >= min_ff or show_all_scans:
                     passed += 1
                     rows.append({
+                        # Common (8)
                         "timestamp": timestamp,
                         "symbol": sym,
                         "structure": "atm-call",
-                        "call_ff": "",  # Not used for ATM structure
-                        "put_ff": "",  # Not used for ATM structure
-                        "combined_ff": "",  # Not used for ATM structure
-                        "min_ff": "",  # Not applicable for ATM structure
-                        "atm_ff": round(atm_ff, 6),
-                        "atm_delta": round(front_choice.actual_delta, 4),
-                        "atm_iv_front": round(atm_iv_front, 6),
-                        "atm_iv_back": round(atm_iv_back, 6),
-                        "atm_fwd_iv": round(atm_fwd_iv, 6),
                         "spot_price": f"{spot:.2f}",
                         "front_dte": front_choice.dte,
                         "back_dte": back_choice.dte,
                         "front_expiry": front_choice.expiration.isoformat(),
                         "back_expiry": back_choice.expiration.isoformat(),
+                        # ATM-specific (8) - populated for ATM structure
                         "atm_strike": f"{front_choice.strike:.2f}",
+                        "atm_delta": round(front_choice.actual_delta, 4),
+                        "atm_ff": round(atm_ff, 6),
+                        "atm_iv_front": round(atm_iv_front, 6),
+                        "atm_iv_back": round(atm_iv_back, 6),
+                        "atm_fwd_iv": round(atm_fwd_iv, 6),
+                        "atm_iv_source_front": atm_iv_src_front,
+                        "atm_iv_source_back": atm_iv_src_back,
+                        # Double-specific (8) - empty for ATM structure
                         "call_strike": "",
                         "put_strike": "",
                         "call_delta": "",
                         "put_delta": "",
+                        "call_ff": "",
+                        "put_ff": "",
+                        "min_ff": "",
+                        "combined_ff": "",
+                        # IV detail (6) - keep for transparency per CLAUDE.md
                         "call_front_iv": round(call_iv_f, 6),
                         "call_back_iv": round(call_iv_b, 6),
-                        "call_fwd_iv": "",  # Not used for ATM structure
+                        "call_fwd_iv": "",
                         "put_front_iv": round(put_iv_f, 6),
                         "put_back_iv": round(put_iv_b, 6),
-                        "put_fwd_iv": "",  # Not used for ATM structure
-                        "earnings_conflict": "no" if not earnings_date else "",
-                        "earnings_date": earnings_date.isoformat() if earnings_date else "",
-                        "avg_options_volume": f"{avg_volume:.2f}" if avg_volume is not None else "",
+                        "put_fwd_iv": "",
+                        # IV sources - double (4) - keep for reference
                         "iv_source_call_front": call_iv_src_front,
                         "iv_source_call_back": call_iv_src_back,
                         "iv_source_put_front": put_iv_src_front,
                         "iv_source_put_back": put_iv_src_back,
+                        # Quality filters (4)
+                        "earnings_conflict": "no" if not earnings_date else "",
+                        "earnings_date": earnings_date.isoformat() if earnings_date else "",
+                        "avg_options_volume_20d": f"{avg_volume:.2f}" if avg_volume is not None else "",
                         "earnings_source": earnings_source,
+                        # Tracking (1)
                         "skip_reason": ""
                     })
 
@@ -1677,21 +1700,32 @@ Examples:
         earnings_data=earnings_data
     ))
 
-    # Updated CSV schema with ATM-specific columns
+    # v2.2 CSV schema (39 columns)
+    # Breaking changes from v2.1:
+    # - Added: atm_iv_source_front, atm_iv_source_back (ATM-specific IV source tracking)
+    # - Renamed: avg_options_volume → avg_options_volume_20d
+    # - Reordered: Logical grouping by structure (common, ATM, double, IV detail, sources, quality)
     cols = [
-        "timestamp", "symbol", "structure",
-        "call_ff", "put_ff", "combined_ff", "min_ff",
-        "atm_ff", "atm_delta", "atm_iv_front", "atm_iv_back", "atm_fwd_iv",
-        "spot_price",
+        # Common (8)
+        "timestamp", "symbol", "structure", "spot_price",
         "front_dte", "back_dte", "front_expiry", "back_expiry",
-        "atm_strike", "call_strike", "put_strike", "call_delta", "put_delta",
+        # ATM-specific (8)
+        "atm_strike", "atm_delta", "atm_ff",
+        "atm_iv_front", "atm_iv_back", "atm_fwd_iv",
+        "atm_iv_source_front", "atm_iv_source_back",
+        # Double-specific (8)
+        "call_strike", "put_strike", "call_delta", "put_delta",
+        "call_ff", "put_ff", "min_ff", "combined_ff",
+        # IV detail (6)
         "call_front_iv", "call_back_iv", "call_fwd_iv",
         "put_front_iv", "put_back_iv", "put_fwd_iv",
-        "earnings_conflict", "earnings_date",
-        "avg_options_volume",
+        # IV sources - double (4)
         "iv_source_call_front", "iv_source_call_back",
         "iv_source_put_front", "iv_source_put_back",
-        "earnings_source",
+        # Quality filters (4)
+        "earnings_conflict", "earnings_date",
+        "avg_options_volume_20d", "earnings_source",
+        # Tracking (1)
         "skip_reason"
     ]
 

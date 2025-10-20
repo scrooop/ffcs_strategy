@@ -54,11 +54,19 @@ SKIP_MISSING_IV = "missing_iv"
 SKIP_EXPIRY_MISMATCH = "expiry_mismatch"
 SKIP_DELTA_NOT_FOUND = "delta_not_found"
 SKIP_EARNINGS_CONFLICT = "earnings_conflict"
-SKIP_LOW_LIQUIDITY = "low_liquidity"
+SKIP_VOLUME_TOO_LOW = "volume_too_low"
 SKIP_NO_QUOTE = "no_quote"
 SKIP_NO_CHAIN = "no_chain"
 SKIP_BOTH_LEGS_REQUIRED = "both_legs_required"
 SKIP_BELOW_FF_THRESHOLD = "below_ff_threshold"
+
+# ---------- ATM Strike Selection Constants ----------
+# Target delta for ATM strike selection (50Δ = at-the-money)
+ATM_DELTA_TARGET = 0.50
+
+# Maximum delta deviation from target when selecting ATM strikes
+# If no strikes within ±0.10Δ of target, fallback to nearest-spot logic
+ATM_DELTA_TOLERANCE = 0.10
 
 # ---------- Logger ----------
 logger = logging.getLogger(__name__)
@@ -238,6 +246,7 @@ class ATMChoice:
     call_streamer_symbol: str
     put_streamer_symbol: str
     dte: int
+    actual_delta: Optional[float] = None  # Call delta at selected strike (None if fallback used)
 
 def nearest_expiration(chain, target_dte: int, dte_tolerance: int) -> Optional[date]:
     """
@@ -589,11 +598,11 @@ async def get_double_calendar_strikes(
 
 def fetch_market_metrics(session: Session, symbols: List[str]) -> Dict[str, any]:
     """
-    Batch fetch earnings dates, liquidity ratings, and X-earn IV data for all symbols.
+    Batch fetch earnings dates, average options volume, and X-earn IV data for all symbols.
 
     Calls tastytrade's get_market_metrics() API to retrieve:
     - Earnings dates (earnings.expected_report_date)
-    - Liquidity ratings (0-5 scale)
+    - Average options volume (liquidity_value field as volume proxy)
     - X-earn IV by expiration (option_expiration_implied_volatilities)
 
     Args:
@@ -607,10 +616,15 @@ def fetch_market_metrics(session: Session, symbols: List[str]) -> Dict[str, any]
     Raises:
         None (logs error to stderr and returns empty dict on failure)
 
+    Note:
+        - liquidity_value is used as a proxy for average options volume
+        - Field may be None for futures or illiquid symbols
+        - Futures symbols are allowed through if volume field is missing
+
     Example:
         >>> metrics = fetch_market_metrics(session, ['SPY', 'QQQ'])
-        >>> metrics['SPY'].liquidity_rating
-        5
+        >>> metrics['SPY'].liquidity_value
+        117690.89
         >>> metrics['SPY'].earnings.expected_report_date
         date(2025, 10, 25)
     """
@@ -686,63 +700,68 @@ def check_earnings_conflict(
 
     return (True, None)
 
-def check_liquidity(
+def check_volume(
     symbol: str,
     metrics: Dict[str, any],
-    min_rating: int
+    min_volume: float
 ) -> Tuple[bool, Optional[str]]:
     """
-    Check if symbol's liquidity rating meets minimum threshold.
+    Check if symbol's average options volume meets minimum threshold.
 
-    Liquidity ratings from tastytrade are on a 0-5 scale:
-    - 5: Extremely liquid (tight bid-ask, deep book)
-    - 4: Very liquid
-    - 3: Moderately liquid (typical minimum for calendar spreads)
-    - 2: Low liquidity (wide spreads possible)
-    - 1: Very low liquidity
-    - 0: Illiquid (avoid trading)
+    Uses liquidity_value from Market Metrics API as a proxy for average options volume.
+    This provides a transparent, volume-based filter replacing the opaque liquidity rating.
 
     Args:
         symbol: Ticker symbol (e.g., 'SPY')
         metrics: Market metrics dict from fetch_market_metrics()
-        min_rating: Minimum acceptable liquidity rating (0-5, default 3)
+        min_volume: Minimum acceptable average volume (default 10000)
 
     Returns:
         Tuple of (passes_filter, reason_string):
-        - (True, None): Meets threshold OR liquidity data unavailable
+        - (True, None): Meets threshold OR volume data unavailable OR futures symbol
         - (False, reason): Below threshold with explanation
 
     Raises:
         None (gracefully handles missing/invalid data with warnings to stderr)
 
-    Example:
-        >>> check_liquidity('SPY', metrics, min_rating=3)
-        (True, None)  # SPY has rating 5
+    Note:
+        - Futures symbols without volume data are allowed through (not an error)
+        - Missing volume data for equities generates warning but allows through
 
-        >>> check_liquidity('ILLIQUID', metrics, min_rating=3)
-        (False, 'Liquidity rating 2 < 3')
+    Example:
+        >>> check_volume('SPY', metrics, min_volume=10000)
+        (True, None)  # SPY has volume ~117k
+
+        >>> check_volume('ILLIQUID', metrics, min_volume=10000)
+        (False, 'Avg volume 5432.1 < 10000')
     """
     if symbol not in metrics:
-        print(f"[WARN] {symbol}: Market metrics unavailable, skipping liquidity check", file=sys.stderr)
+        print(f"[WARN] {symbol}: Market metrics unavailable, skipping volume check", file=sys.stderr)
         return (True, None)
 
     metric_info = metrics[symbol]
 
-    # Check if liquidity_rating attribute exists
-    liquidity_rating = getattr(metric_info, 'liquidity_rating', None)
-    if liquidity_rating is None:
-        print(f"[WARN] {symbol}: Liquidity rating unavailable, skipping liquidity check", file=sys.stderr)
+    # Check if liquidity_value (volume proxy) exists
+    avg_volume = getattr(metric_info, 'liquidity_value', None)
+
+    # Handle futures symbols - allow through if volume field is missing
+    if is_futures_symbol(symbol) and avg_volume is None:
+        logger.debug(f"{symbol}: Futures symbol, volume check skipped (field missing)")
         return (True, None)
 
-    # Convert to int if needed
+    if avg_volume is None:
+        print(f"[WARN] {symbol}: Volume data unavailable, skipping volume check", file=sys.stderr)
+        return (True, None)
+
+    # Convert to float if needed
     try:
-        rating = int(liquidity_rating)
+        volume = float(avg_volume)
     except (ValueError, TypeError):
-        print(f"[WARN] {symbol}: Invalid liquidity rating format, skipping liquidity check", file=sys.stderr)
+        print(f"[WARN] {symbol}: Invalid volume format, skipping volume check", file=sys.stderr)
         return (True, None)
 
-    if rating < min_rating:
-        reason = f"Liquidity rating {rating} < {min_rating}"
+    if volume < min_volume:
+        reason = f"Avg volume {volume:.1f} < {min_volume}"
         return (False, reason)
 
     return (True, None)
@@ -798,9 +817,8 @@ def extract_xearn_iv(
 
 async def scan(session: Session, tickers: List[str], pairs: List[Tuple[int, int]],
                min_ff: float, dte_tolerance: int, timeout_s: float,
-               skip_earnings: bool = True, min_liquidity_rating: int = 3,
+               skip_earnings: bool = True, min_avg_volume: float = 10000,
                skip_liquidity_check: bool = False, show_earnings_conflicts: bool = False,
-               use_xearn_iv: bool = True, force_greeks_iv: bool = False,
                show_all_scans: bool = False, structure: str = "both",
                delta_tolerance: float = 0.05, earnings_data: Optional[Dict[str, dict]] = None) -> Tuple[List[dict], Dict[str, int], int, int]:
     """
@@ -827,11 +845,9 @@ async def scan(session: Session, tickers: List[str], pairs: List[Tuple[int, int]
         dte_tolerance: Max deviation from target DTE in days (default 5)
         timeout_s: Greeks streaming timeout in seconds (default 3.0)
         skip_earnings: Filter out positions with earnings conflicts (default True)
-        min_liquidity_rating: Minimum liquidity rating 0-5 (default 3)
+        min_avg_volume: Minimum average options volume (default 10000)
         skip_liquidity_check: Disable liquidity filtering (default False)
         show_earnings_conflicts: Include filtered positions in output (default False)
-        use_xearn_iv: Try X-earn IV before falling back to Greeks IV (default True)
-        force_greeks_iv: Always use Greeks IV, skip X-earn IV (default False)
         show_all_scans: Show all results regardless of FF threshold (default False)
         structure: Calendar type: "atm-call", "double", or "both" (default "both")
         delta_tolerance: Max delta deviation for double calendars (default 0.05 = ±5Δ)
@@ -839,9 +855,9 @@ async def scan(session: Session, tickers: List[str], pairs: List[Tuple[int, int]
 
     Returns:
         Tuple of (rows, skip_stats, scanned, passed):
-        - rows: List of dict rows with 32-column unified CSV schema:
+        - rows: List of dict rows with 33-column unified CSV schema:
           - timestamp, symbol, structure
-          - call_ff, put_ff, combined_ff (FF metrics - primary sort key)
+          - call_ff, put_ff, combined_ff, min_ff (FF metrics)
           - spot_price, front_dte, back_dte, front_expiry, back_expiry
           - atm_strike (ATM calendars only), call_strike, put_strike, call_delta, put_delta
           - call_front_iv, call_back_iv, call_fwd_iv (call leg IVs)
@@ -854,7 +870,10 @@ async def scan(session: Session, tickers: List[str], pairs: List[Tuple[int, int]
           - skip_reason (empty string if not skipped)
           For ATM calendars: call and put IVs are from same strike (may differ slightly)
           For double calendars: call and put IVs are from different strikes (+35Δ vs -35Δ)
-          Sorted by combined_ff descending, then symbol ascending.
+          Sorting: Double calendars by min_ff descending (primary), combined_ff (secondary)
+                   ATM calendars by combined_ff descending
+          Filtering: Double calendars use min_ff >= threshold (both wings must pass)
+                    ATM calendars use combined_ff >= threshold
         - skip_stats: Dict[str, int] mapping skip reasons to counts
         - scanned: int total symbols scanned
         - passed: int opportunities that met FF threshold
@@ -884,7 +903,7 @@ async def scan(session: Session, tickers: List[str], pairs: List[Tuple[int, int]
         SKIP_EXPIRY_MISMATCH: 0,
         SKIP_DELTA_NOT_FOUND: 0,
         SKIP_EARNINGS_CONFLICT: 0,
-        SKIP_LOW_LIQUIDITY: 0,
+        SKIP_VOLUME_TOO_LOW: 0,
         SKIP_NO_QUOTE: 0,
         SKIP_NO_CHAIN: 0,
         SKIP_BOTH_LEGS_REQUIRED: 0,
@@ -927,9 +946,9 @@ async def scan(session: Session, tickers: List[str], pairs: List[Tuple[int, int]
                 print(f"[WARN] Could not get market data for {sym}: {e}, skipping.", file=sys.stderr)
                 continue
 
-        # 2) Extract earnings and liquidity data for this symbol
+        # 2) Extract earnings and volume data for this symbol
         earnings_date = None
-        liquidity_rating = None
+        avg_volume = None
         earnings_source = "none"  # Default: no earnings data found
 
         if sym in market_metrics:
@@ -937,7 +956,7 @@ async def scan(session: Session, tickers: List[str], pairs: List[Tuple[int, int]
             earnings = getattr(metric_info, 'earnings', None)
             if earnings:
                 earnings_date = getattr(earnings, 'expected_report_date', None)
-            liquidity_rating = getattr(metric_info, 'liquidity_rating', None)
+            avg_volume = getattr(metric_info, 'liquidity_value', None)
 
         # Determine earnings_source from earnings_data dict (if provided)
         if earnings_data is not None and sym in earnings_data:
@@ -984,10 +1003,10 @@ async def scan(session: Session, tickers: List[str], pairs: List[Tuple[int, int]
                 continue
 
         if not skip_liquidity_check:
-            passes, reason = check_liquidity(sym, market_metrics, min_liquidity_rating)
+            passes, reason = check_volume(sym, market_metrics, min_avg_volume)
             if not passes:
-                skip_stats[SKIP_LOW_LIQUIDITY] += 1
-                logger.debug(f"Skipping {sym}: {SKIP_LOW_LIQUIDITY} - {reason}")
+                skip_stats[SKIP_VOLUME_TOO_LOW] += 1
+                logger.debug(f"Skipping {sym}: {SKIP_VOLUME_TOO_LOW} - {reason}")
                 print(f"[INFO] {sym}: {reason}, skipping", file=sys.stderr)
                 continue
 
@@ -1088,67 +1107,77 @@ async def scan(session: Session, tickers: List[str], pairs: List[Tuple[int, int]
                 # Calculate combined FF (average of both legs)
                 combined_ff = (ff_call + ff_put) / 2.0
 
-                # Try X-earn IV first for double calendars (if enabled)
+                # Use Greeks IV as primary (strike-level precision, preserves skew)
+                # Fallback to ex-earn IV only if Greeks data is missing/invalid
                 call_iv_source_front = "greeks"
                 call_iv_source_back = "greeks"
                 put_iv_source_front = "greeks"
                 put_iv_source_back = "greeks"
 
-                if use_xearn_iv and not force_greeks_iv:
-                    # Try X-earn IV for call leg
+                # Primary: Use Greeks IV from strike-level snapshot
+                front_call_iv = front_call.iv
+                back_call_iv = back_call.iv
+                front_put_iv = front_put.iv
+                back_put_iv = back_put.iv
+
+                # Rare fallback: Use ex-earn IV if Greeks data missing for call leg
+                if front_call_iv is None or front_call_iv <= 0:
+                    logger.warning(f"{sym}: Greeks IV missing for call front leg, using ex-earn fallback")
                     xearn_call_front = extract_xearn_iv(market_metrics, sym, front_choice["expiration"])
+                    if xearn_call_front and xearn_call_front > 0:
+                        front_call_iv = xearn_call_front
+                        call_iv_source_front = "exearn_fallback"
+                    else:
+                        skip_stats[SKIP_MISSING_IV] += 1
+                        logger.debug(f"Skipping {sym} double {front}-{back}: missing call front IV")
+                        continue
+
+                if back_call_iv is None or back_call_iv <= 0:
+                    logger.warning(f"{sym}: Greeks IV missing for call back leg, using ex-earn fallback")
                     xearn_call_back = extract_xearn_iv(market_metrics, sym, back_choice["expiration"])
-
-                    if xearn_call_front and xearn_call_back:
-                        # Recalculate call leg using X-earn IV
-                        fwd_call_xearn = forward_iv(xearn_call_front, xearn_call_back, front_choice["dte"], back_choice["dte"])
-                        if fwd_call_xearn and fwd_call_xearn > 0:
-                            front_call_iv = xearn_call_front
-                            back_call_iv = xearn_call_back
-                            fwd_call = fwd_call_xearn
-                            ff_call = (front_call_iv - fwd_call) / fwd_call
-                            call_iv_source_front = "xearn"
-                            call_iv_source_back = "xearn"
-                        else:
-                            # X-earn IV failed, use Greeks
-                            front_call_iv = front_call.iv
-                            back_call_iv = back_call.iv
+                    if xearn_call_back and xearn_call_back > 0:
+                        back_call_iv = xearn_call_back
+                        call_iv_source_back = "exearn_fallback"
                     else:
-                        # X-earn IV not available, use Greeks
-                        front_call_iv = front_call.iv
-                        back_call_iv = back_call.iv
+                        skip_stats[SKIP_MISSING_IV] += 1
+                        logger.debug(f"Skipping {sym} double {front}-{back}: missing call back IV")
+                        continue
 
-                    # Try X-earn IV for put leg
+                # Rare fallback: Use ex-earn IV if Greeks data missing for put leg
+                if front_put_iv is None or front_put_iv <= 0:
+                    logger.warning(f"{sym}: Greeks IV missing for put front leg, using ex-earn fallback")
                     xearn_put_front = extract_xearn_iv(market_metrics, sym, front_choice["expiration"])
-                    xearn_put_back = extract_xearn_iv(market_metrics, sym, back_choice["expiration"])
-
-                    if xearn_put_front and xearn_put_back:
-                        # Recalculate put leg using X-earn IV
-                        fwd_put_xearn = forward_iv(xearn_put_front, xearn_put_back, front_choice["dte"], back_choice["dte"])
-                        if fwd_put_xearn and fwd_put_xearn > 0:
-                            front_put_iv = xearn_put_front
-                            back_put_iv = xearn_put_back
-                            fwd_put = fwd_put_xearn
-                            ff_put = (front_put_iv - fwd_put) / fwd_put
-                            put_iv_source_front = "xearn"
-                            put_iv_source_back = "xearn"
-                        else:
-                            # X-earn IV failed, use Greeks
-                            front_put_iv = front_put.iv
-                            back_put_iv = back_put.iv
+                    if xearn_put_front and xearn_put_front > 0:
+                        front_put_iv = xearn_put_front
+                        put_iv_source_front = "exearn_fallback"
                     else:
-                        # X-earn IV not available, use Greeks
-                        front_put_iv = front_put.iv
-                        back_put_iv = back_put.iv
+                        skip_stats[SKIP_MISSING_IV] += 1
+                        logger.debug(f"Skipping {sym} double {front}-{back}: missing put front IV")
+                        continue
 
-                    # Recalculate combined_ff if X-earn was used
-                    combined_ff = (ff_call + ff_put) / 2.0
-                else:
-                    # Use Greeks IV (already calculated above)
-                    front_call_iv = front_call.iv
-                    back_call_iv = back_call.iv
-                    front_put_iv = front_put.iv
-                    back_put_iv = back_put.iv
+                if back_put_iv is None or back_put_iv <= 0:
+                    logger.warning(f"{sym}: Greeks IV missing for put back leg, using ex-earn fallback")
+                    xearn_put_back = extract_xearn_iv(market_metrics, sym, back_choice["expiration"])
+                    if xearn_put_back and xearn_put_back > 0:
+                        back_put_iv = xearn_put_back
+                        put_iv_source_back = "exearn_fallback"
+                    else:
+                        skip_stats[SKIP_MISSING_IV] += 1
+                        logger.debug(f"Skipping {sym} double {front}-{back}: missing put back IV")
+                        continue
+
+                # Recalculate forward IV and FF with actual IVs used (Greeks or fallback)
+                fwd_call = forward_iv(front_call_iv, back_call_iv, front_choice["dte"], back_choice["dte"])
+                fwd_put = forward_iv(front_put_iv, back_put_iv, front_choice["dte"], back_choice["dte"])
+
+                if fwd_call is None or fwd_call <= 0 or fwd_put is None or fwd_put <= 0:
+                    skip_stats[SKIP_NONPOSITIVE_FWD_VAR] += 1
+                    logger.debug(f"Skipping {sym} double {front}-{back}: negative forward IV after IV assignment")
+                    continue
+
+                ff_call = (front_call_iv - fwd_call) / fwd_call
+                ff_put = (front_put_iv - fwd_put) / fwd_put
+                combined_ff = (ff_call + ff_put) / 2.0
 
                 # Filter on combined_ff
                 if combined_ff >= min_ff or show_all_scans:
@@ -1178,8 +1207,7 @@ async def scan(session: Session, tickers: List[str], pairs: List[Tuple[int, int]
                         "put_fwd_iv": round(fwd_put, 6),
                         "earnings_conflict": "no" if not earnings_date else "",
                         "earnings_date": earnings_date.isoformat() if earnings_date else "",
-                        "liquidity_rating": liquidity_rating if liquidity_rating is not None else "",
-                        "liquidity_value": "",
+                        "avg_options_volume": f"{avg_volume:.2f}" if avg_volume is not None else "",
                         "iv_source_call_front": call_iv_source_front,
                         "iv_source_call_back": call_iv_source_back,
                         "iv_source_put_front": put_iv_source_front,
@@ -1189,22 +1217,34 @@ async def scan(session: Session, tickers: List[str], pairs: List[Tuple[int, int]
                     })
 
         if scan_atm:
-            # ========== ATM CALENDAR MODE (existing logic) ==========
+            # ========== ATM CALENDAR MODE (delta-based strike selection) ==========
             choices: Dict[int, ATMChoice] = {}
             streamer_syms: List[str] = []
 
+            # First, fetch Greeks for a range of strikes for each expiration
+            # This allows delta-based ATM strike selection (50Δ target)
             for target in required_targets:
                 exp_date = nearest_expiration(chain, target, dte_tolerance)
                 if exp_date is None:
                     continue
                 exp_obj = exp_by_date[exp_date]
-                strike, call_sym, put_sym = pick_atm_strike(exp_obj, spot)
+
+                # Fetch Greeks for strikes around spot price (±25% range)
+                greeks_map = await snapshot_greeks_for_range(
+                    session, exp_obj, spot, range_pct=0.25, timeout_s=timeout_s
+                )
+
+                # Select ATM strike using delta-based selection (50Δ target)
+                # Falls back to nearest-spot if no Greeks available or no strikes within tolerance
+                strike, actual_delta, call_sym, put_sym = pick_atm_strike(exp_obj, spot, greeks_map)
+
                 choices[target] = ATMChoice(
                     expiration=exp_date,
                     strike=strike,
                     call_streamer_symbol=call_sym,
                     put_streamer_symbol=put_sym,
                     dte=dte(exp_date, today),
+                    actual_delta=actual_delta
                 )
                 streamer_syms.extend([call_sym, put_sym])
 
@@ -1212,59 +1252,52 @@ async def scan(session: Session, tickers: List[str], pairs: List[Tuple[int, int]
                 print(f"[WARN] No expirations matched tolerance for {sym}", file=sys.stderr)
                 continue
 
-            # 4) Try X-earn IV first (if enabled), then fall back to Greeks IV
+            # 4) Use Greeks IV as primary (strike-level), fallback to ex-earn IV if missing
             # Store call and put IVs separately for transparency
             call_iv_by_target: Dict[int, float] = {}
             put_iv_by_target: Dict[int, float] = {}
             call_iv_source_by_target: Dict[int, str] = {}
             put_iv_source_by_target: Dict[int, str] = {}
 
-            # Try X-earn IV for each target DTE
-            if use_xearn_iv and not force_greeks_iv:
-                for target, ch in choices.items():
+            # Primary: Snapshot Greeks (to get IV and delta) for all ATM contracts
+            greek_map = await snapshot_greeks(session, streamer_syms, timeout_s=timeout_s)
+
+            for target, ch in choices.items():
+                call_iv = None
+                put_iv = None
+                # Unpack (iv, delta) tuples from greek_map
+                if ch.call_streamer_symbol in greek_map:
+                    iv, delta = greek_map[ch.call_streamer_symbol]
+                    call_iv = iv if iv is not None and iv > 0 else None
+                if ch.put_streamer_symbol in greek_map:
+                    iv, delta = greek_map[ch.put_streamer_symbol]
+                    put_iv = iv if iv is not None and iv > 0 else None
+
+                # Store Greeks IV if available
+                if call_iv:
+                    call_iv_by_target[target] = call_iv
+                    call_iv_source_by_target[target] = "greeks"
+                if put_iv:
+                    put_iv_by_target[target] = put_iv
+                    put_iv_source_by_target[target] = "greeks"
+
+            # Rare fallback: Use ex-earn IV for targets where Greeks IV is missing
+            for target, ch in choices.items():
+                # Check if we need fallback for call IV
+                if target not in call_iv_by_target:
+                    logger.warning(f"{sym} {target}DTE: Greeks IV missing for call, using ex-earn fallback")
                     xearn_iv = extract_xearn_iv(market_metrics, sym, ch.expiration)
                     if xearn_iv is not None and xearn_iv > 0:
-                        # X-earn IV is not call/put specific, use for both
                         call_iv_by_target[target] = xearn_iv
+                        call_iv_source_by_target[target] = "exearn_fallback"
+
+                # Check if we need fallback for put IV
+                if target not in put_iv_by_target:
+                    logger.warning(f"{sym} {target}DTE: Greeks IV missing for put, using ex-earn fallback")
+                    xearn_iv = extract_xearn_iv(market_metrics, sym, ch.expiration)
+                    if xearn_iv is not None and xearn_iv > 0:
                         put_iv_by_target[target] = xearn_iv
-                        call_iv_source_by_target[target] = "xearn"
-                        put_iv_source_by_target[target] = "xearn"
-
-            # For targets without X-earn IV, fall back to Greeks IV
-            targets_needing_greeks = [t for t in choices.keys() if t not in call_iv_by_target]
-
-            if targets_needing_greeks or force_greeks_iv:
-                # Snapshot Greeks (to get IV and delta) for all needed ATM contracts
-                greek_map = await snapshot_greeks(session, streamer_syms, timeout_s=timeout_s)
-
-                for target, ch in choices.items():
-                    # Skip if X-earn IV already available (unless force_greeks_iv)
-                    if target in call_iv_by_target and not force_greeks_iv:
-                        continue
-
-                    call_iv = None
-                    put_iv = None
-                    # Unpack (iv, delta) tuples from greek_map
-                    if ch.call_streamer_symbol in greek_map:
-                        iv, delta = greek_map[ch.call_streamer_symbol]
-                        call_iv = iv if iv is not None and iv > 0 else None
-                    if ch.put_streamer_symbol in greek_map:
-                        iv, delta = greek_map[ch.put_streamer_symbol]
-                        put_iv = iv if iv is not None and iv > 0 else None
-
-                    # Store call and put IVs separately
-                    if call_iv:
-                        call_iv_by_target[target] = call_iv
-                        call_iv_source_by_target[target] = "greeks"
-                    if put_iv:
-                        put_iv_by_target[target] = put_iv
-                        put_iv_source_by_target[target] = "greeks"
-
-            # Log X-earn IV fallback warnings
-            if use_xearn_iv and not force_greeks_iv:
-                for target in choices.keys():
-                    if target not in call_iv_source_by_target or call_iv_source_by_target[target] == "greeks":
-                        print(f"[INFO] {sym} {target}DTE: X-earn IV unavailable, using Greeks IV", file=sys.stderr)
+                        put_iv_source_by_target[target] = "exearn_fallback"
 
             # 6) Build rows for pairs
             for front, back in pairs:
@@ -1351,8 +1384,7 @@ async def scan(session: Session, tickers: List[str], pairs: List[Tuple[int, int]
                         "put_fwd_iv": round(put_fwd, 6),
                         "earnings_conflict": "no" if not earnings_date else "",
                         "earnings_date": earnings_date.isoformat() if earnings_date else "",
-                        "liquidity_rating": liquidity_rating if liquidity_rating is not None else "",
-                        "liquidity_value": "",
+                        "avg_options_volume": f"{avg_volume:.2f}" if avg_volume is not None else "",
                         "iv_source_call_front": call_iv_src_front,
                         "iv_source_call_back": call_iv_src_back,
                         "iv_source_put_front": put_iv_src_front,
@@ -1410,8 +1442,8 @@ Examples:
   # Allow trading through earnings (disable earnings filter)
   python ff_tastytrade_scanner.py --tickers AAPL --pairs 30-90 --allow-earnings
 
-  # Force use of Greeks IV instead of X-earn IV
-  python ff_tastytrade_scanner.py --tickers QQQ --pairs 60-90 --force-greeks-iv
+  # Adjust delta tolerance for double calendars (tighter selection)
+  python ff_tastytrade_scanner.py --tickers SPY --pairs 30-60 --structure double --delta-tolerance 0.03
         """,
         formatter_class=argparse.RawDescriptionHelpFormatter
     )
@@ -1442,17 +1474,11 @@ Examples:
     ap.add_argument("--show-earnings-conflicts", action="store_true",
                     help="Show filtered positions due to earnings.")
 
-    # Liquidity filtering flags
-    ap.add_argument("--min-liquidity-rating", type=int, default=3,
-                    help="Minimum liquidity rating 0-5 (default: 3).")
+    # Volume filtering flags
+    ap.add_argument("--min-avg-volume", type=float, default=10000,
+                    help="Minimum average options volume (default: 10000 contracts/day).")
     ap.add_argument("--skip-liquidity-check", action="store_true",
-                    help="Disable liquidity filtering.")
-
-    # X-earn IV flags
-    ap.add_argument("--use-xearn-iv", dest="use_xearn_iv", action="store_true", default=True,
-                    help="Try to use X-earn IV from market metrics (default: True).")
-    ap.add_argument("--force-greeks-iv", action="store_true",
-                    help="Force use of Greeks IV instead of X-earn IV.")
+                    help="Disable volume filtering.")
 
     # Debug/analysis flags
     ap.add_argument("--show-all-scans", action="store_true",
@@ -1491,17 +1517,8 @@ Examples:
         logging.getLogger('earnings_cache').setLevel(logging.WARNING)
 
     # Validate flag values
-    if args.min_liquidity_rating < 0 or args.min_liquidity_rating > 5:
-        print("ERROR: --min-liquidity-rating must be between 0 and 5", file=sys.stderr)
-        sys.exit(1)
-
     if args.delta_tolerance < 0.01 or args.delta_tolerance > 0.10:
         print("ERROR: --delta-tolerance must be between 0.01 and 0.10", file=sys.stderr)
-        sys.exit(1)
-
-    # Check for conflicting flags
-    if args.use_xearn_iv and args.force_greeks_iv:
-        print("ERROR: --use-xearn-iv and --force-greeks-iv are mutually exclusive", file=sys.stderr)
         sys.exit(1)
 
     username = os.environ.get("TT_USERNAME", "").strip()
@@ -1581,18 +1598,16 @@ Examples:
     rows, skip_stats, scanned, passed = asyncio.run(scan(
         session, tickers, pairs, args.min_ff, args.dte_tolerance, args.timeout,
         skip_earnings=skip_earnings_flag,
-        min_liquidity_rating=args.min_liquidity_rating,
+        min_avg_volume=args.min_avg_volume,
         skip_liquidity_check=args.skip_liquidity_check,
         show_earnings_conflicts=args.show_earnings_conflicts,
-        use_xearn_iv=args.use_xearn_iv,
-        force_greeks_iv=args.force_greeks_iv,
         show_all_scans=args.show_all_scans,
         structure=args.structure,
         delta_tolerance=args.delta_tolerance,
         earnings_data=earnings_data
     ))
 
-    # Unified 32-column CSV schema
+    # Unified 31-column CSV schema
     cols = [
         "timestamp", "symbol", "structure",
         "call_ff", "put_ff", "combined_ff",
@@ -1602,7 +1617,7 @@ Examples:
         "call_front_iv", "call_back_iv", "call_fwd_iv",
         "put_front_iv", "put_back_iv", "put_fwd_iv",
         "earnings_conflict", "earnings_date",
-        "liquidity_rating", "liquidity_value",
+        "avg_options_volume",
         "iv_source_call_front", "iv_source_call_back",
         "iv_source_put_front", "iv_source_put_back",
         "earnings_source",

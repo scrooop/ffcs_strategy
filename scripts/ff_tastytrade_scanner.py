@@ -343,21 +343,27 @@ async def snapshot_greeks(session: Session, streamer_symbols: List[str], timeout
         Partial results are acceptable on timeout. Caller should handle missing data.
     """
     raw_results: Dict[str, Greeks] = {}
-    async with DXLinkStreamer(session) as streamer:
-        if streamer_symbols:
-            await streamer.subscribe(Greeks, streamer_symbols)
 
-            async def collector():
-                async for g in streamer.listen(Greeks):
-                    raw_results[g.event_symbol] = g
-                    if len(raw_results) >= len(streamer_symbols):
-                        break
+    try:
+        async with DXLinkStreamer(session) as streamer:
+            if streamer_symbols:
+                await streamer.subscribe(Greeks, streamer_symbols)
 
-            try:
-                await asyncio.wait_for(collector(), timeout=timeout_s)
-            except asyncio.TimeoutError:
-                # partial results are okay; caller will decide how to handle
-                pass
+                async def collector():
+                    async for g in streamer.listen(Greeks):
+                        raw_results[g.event_symbol] = g
+                        if len(raw_results) >= len(streamer_symbols):
+                            break
+
+                try:
+                    await asyncio.wait_for(collector(), timeout=timeout_s)
+                except asyncio.TimeoutError:
+                    # partial results are okay; caller will decide how to handle
+                    pass
+    except Exception as e:
+        # Handle streamer connection failures (timeout, network errors, etc.)
+        logger.warning(f"Greeks streamer connection failed: {e}. Continuing without Greeks data for this batch.")
+        return {}  # Return empty dict, caller will handle missing data
 
     # Extract (iv, delta) tuples from Greeks objects
     results: Dict[str, Tuple[float, float]] = {}

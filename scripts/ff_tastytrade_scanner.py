@@ -1241,6 +1241,11 @@ async def scan(session: Session, tickers: List[str], pairs: List[Tuple[int, int]
                         "put_ff": round(ff_put, 6),
                         "combined_ff": round(combined_ff, 6),
                         "min_ff": round(min_ff_double, 6),
+                        "atm_ff": "",  # Not used for double structure
+                        "atm_delta": "",  # Not used for double structure
+                        "atm_iv_front": "",  # Not used for double structure
+                        "atm_iv_back": "",  # Not used for double structure
+                        "atm_fwd_iv": "",  # Not used for double structure
                         "spot_price": f"{spot:.2f}",
                         "front_dte": front_choice["dte"],
                         "back_dte": back_choice["dte"],
@@ -1383,24 +1388,18 @@ async def scan(session: Session, tickers: List[str], pairs: List[Tuple[int, int]
                     logger.debug(f"Skipping {sym} ATM {front}-{back} put: {put_skip_reason}")
                     continue
 
-                # Calculate call FF
-                call_fwd = forward_iv(call_iv_f, call_iv_b, front_choice.dte, back_choice.dte)
-                if call_fwd is None or call_fwd <= 0:
-                    skip_stats[SKIP_NONPOSITIVE_FWD_VAR] += 1
-                    logger.debug(f"Skipping {sym} ATM {front}-{back}: negative call forward IV")
-                    continue
-                call_ff = (call_iv_f - call_fwd) / call_fwd
+                # Calculate single ATM FF using average of call and put IV
+                # Per CLAUDE.md: "IV = average of (call IV, put IV) at that strike"
+                atm_iv_front = (call_iv_f + put_iv_f) / 2.0
+                atm_iv_back = (call_iv_b + put_iv_b) / 2.0
 
-                # Calculate put FF
-                put_fwd = forward_iv(put_iv_f, put_iv_b, front_choice.dte, back_choice.dte)
-                if put_fwd is None or put_fwd <= 0:
+                atm_fwd_iv = forward_iv(atm_iv_front, atm_iv_back, front_choice.dte, back_choice.dte)
+                if atm_fwd_iv is None or atm_fwd_iv <= 0:
                     skip_stats[SKIP_NONPOSITIVE_FWD_VAR] += 1
-                    logger.debug(f"Skipping {sym} ATM {front}-{back}: negative put forward IV")
+                    logger.debug(f"Skipping {sym} ATM {front}-{back}: negative forward IV")
                     continue
-                put_ff = (put_iv_f - put_fwd) / put_fwd
 
-                # Combined FF is average of call and put
-                combined_ff = (call_ff + put_ff) / 2.0
+                atm_ff = (atm_iv_front - atm_fwd_iv) / atm_fwd_iv
 
                 # Determine IV sources
                 call_iv_src_front = call_iv_source_by_target.get(front, "greeks")
@@ -1409,16 +1408,21 @@ async def scan(session: Session, tickers: List[str], pairs: List[Tuple[int, int]
                 put_iv_src_back = put_iv_source_by_target.get(back, "greeks")
 
                 # Include result if: (1) meets FF threshold, OR (2) show_all_scans is enabled
-                if combined_ff >= min_ff or show_all_scans:
+                if atm_ff >= min_ff or show_all_scans:
                     passed += 1
                     rows.append({
                         "timestamp": timestamp,
                         "symbol": sym,
                         "structure": "atm-call",
-                        "call_ff": round(call_ff, 6),
-                        "put_ff": round(put_ff, 6),
-                        "combined_ff": round(combined_ff, 6),
+                        "call_ff": "",  # Not used for ATM structure
+                        "put_ff": "",  # Not used for ATM structure
+                        "combined_ff": "",  # Not used for ATM structure
                         "min_ff": "",  # Not applicable for ATM structure
+                        "atm_ff": round(atm_ff, 6),
+                        "atm_delta": round(front_choice.actual_delta, 4),
+                        "atm_iv_front": round(atm_iv_front, 6),
+                        "atm_iv_back": round(atm_iv_back, 6),
+                        "atm_fwd_iv": round(atm_fwd_iv, 6),
                         "spot_price": f"{spot:.2f}",
                         "front_dte": front_choice.dte,
                         "back_dte": back_choice.dte,
@@ -1431,10 +1435,10 @@ async def scan(session: Session, tickers: List[str], pairs: List[Tuple[int, int]
                         "put_delta": "",
                         "call_front_iv": round(call_iv_f, 6),
                         "call_back_iv": round(call_iv_b, 6),
-                        "call_fwd_iv": round(call_fwd, 6),
+                        "call_fwd_iv": "",  # Not used for ATM structure
                         "put_front_iv": round(put_iv_f, 6),
                         "put_back_iv": round(put_iv_b, 6),
-                        "put_fwd_iv": round(put_fwd, 6),
+                        "put_fwd_iv": "",  # Not used for ATM structure
                         "earnings_conflict": "no" if not earnings_date else "",
                         "earnings_date": earnings_date.isoformat() if earnings_date else "",
                         "avg_options_volume": f"{avg_volume:.2f}" if avg_volume is not None else "",
@@ -1448,7 +1452,7 @@ async def scan(session: Session, tickers: List[str], pairs: List[Tuple[int, int]
 
     # Sort results:
     # - Double calendars: sort by min_ff descending (primary), combined_ff (secondary), symbol (tertiary)
-    # - ATM calendars: sort by combined_ff descending (primary), symbol (secondary)
+    # - ATM calendars: sort by atm_ff descending (primary), symbol (secondary)
     # Separate the two structures for appropriate sorting
     doubles = [r for r in rows if r["structure"] == "double"]
     atm_rows = [r for r in rows if r["structure"] == "atm-call"]
@@ -1456,8 +1460,8 @@ async def scan(session: Session, tickers: List[str], pairs: List[Tuple[int, int]
     # Sort doubles by min_ff (highest first), then combined_ff, then symbol
     doubles.sort(key=lambda r: (-r["min_ff"], -r["combined_ff"], r["symbol"]))
 
-    # Sort ATM by combined_ff (highest first), then symbol
-    atm_rows.sort(key=lambda r: (-r["combined_ff"], r["symbol"]))
+    # Sort ATM by atm_ff (highest first), then symbol
+    atm_rows.sort(key=lambda r: (-r["atm_ff"], r["symbol"]))
 
     # Combine back: doubles first (higher priority), then ATM
     rows = doubles + atm_rows
@@ -1673,10 +1677,11 @@ Examples:
         earnings_data=earnings_data
     ))
 
-    # Unified 32-column CSV schema
+    # Updated CSV schema with ATM-specific columns
     cols = [
         "timestamp", "symbol", "structure",
         "call_ff", "put_ff", "combined_ff", "min_ff",
+        "atm_ff", "atm_delta", "atm_iv_front", "atm_iv_back", "atm_fwd_iv",
         "spot_price",
         "front_dte", "back_dte", "front_expiry", "back_expiry",
         "atm_strike", "call_strike", "put_strike", "call_delta", "put_delta",

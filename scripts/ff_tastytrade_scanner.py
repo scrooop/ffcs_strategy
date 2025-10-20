@@ -1260,20 +1260,28 @@ async def scan(session: Session, tickers: List[str], pairs: List[Tuple[int, int]
                     continue
                 exp_obj = exp_by_date[exp_date]
 
-                # Get ±35Δ strikes
-                try:
-                    delta_strikes = await get_double_calendar_strikes(
-                        session=session,
-                        expiration_obj=exp_obj,
-                        spot=spot,
-                        call_target_delta=0.35,
-                        put_target_delta=-0.35,
-                        delta_tolerance=delta_tolerance,
-                        timeout_s=timeout_s
-                    )
-                except Exception as e:
-                    logger.warning(f"Greeks streamer connection failed for {sym} {exp_date}: {e}. Skipping this expiration.")
-                    delta_strikes = {"call_35delta": None, "put_35delta": None}  # Both legs missing
+                # Conditionally fetch Greeks or use ex-earn IV
+                if use_exearn_iv:
+                    # Skip Greeks streaming when --iv-ex-earn flag enabled
+                    logger.info(f"{sym}: Using ex-earn IV for double calendar (--iv-ex-earn flag enabled)")
+                    # Double calendar requires delta-based selection which needs Greeks
+                    # Skip double calendars when using ex-earn IV (not supported)
+                    delta_strikes = {"call_35delta": None, "put_35delta": None}
+                else:
+                    # Get ±35Δ strikes using Greeks
+                    try:
+                        delta_strikes = await get_double_calendar_strikes(
+                            session=session,
+                            expiration_obj=exp_obj,
+                            spot=spot,
+                            call_target_delta=0.35,
+                            put_target_delta=-0.35,
+                            delta_tolerance=delta_tolerance,
+                            timeout_s=timeout_s
+                        )
+                    except Exception as e:
+                        logger.warning(f"Greeks streamer connection failed for {sym} {exp_date}: {e}. Skipping this expiration.")
+                        delta_strikes = {"call_35delta": None, "put_35delta": None}  # Both legs missing
 
                 # Store with expiration info
                 delta_choices[target] = {

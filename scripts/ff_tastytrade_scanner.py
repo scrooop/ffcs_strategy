@@ -47,6 +47,22 @@ import yfinance as yf
 
 from earnings_cache import EarningsCache
 
+# ---------- Skip Reason Constants ----------
+# Used to track why symbols are skipped during scans
+SKIP_NONPOSITIVE_FWD_VAR = "nonpositive_fwd_var"
+SKIP_MISSING_IV = "missing_iv"
+SKIP_EXPIRY_MISMATCH = "expiry_mismatch"
+SKIP_DELTA_NOT_FOUND = "delta_not_found"
+SKIP_EARNINGS_CONFLICT = "earnings_conflict"
+SKIP_LOW_LIQUIDITY = "low_liquidity"
+SKIP_NO_QUOTE = "no_quote"
+SKIP_NO_CHAIN = "no_chain"
+SKIP_BOTH_LEGS_REQUIRED = "both_legs_required"
+SKIP_BELOW_FF_THRESHOLD = "below_ff_threshold"
+
+# ---------- Logger ----------
+logger = logging.getLogger(__name__)
+
 # ---------- Helpers ----------
 
 def ny_today() -> date:
@@ -786,7 +802,7 @@ async def scan(session: Session, tickers: List[str], pairs: List[Tuple[int, int]
                skip_liquidity_check: bool = False, show_earnings_conflicts: bool = False,
                use_xearn_iv: bool = True, force_greeks_iv: bool = False,
                show_all_scans: bool = False, structure: str = "both",
-               delta_tolerance: float = 0.05, earnings_data: Optional[Dict[str, dict]] = None) -> List[dict]:
+               delta_tolerance: float = 0.05, earnings_data: Optional[Dict[str, dict]] = None) -> Tuple[List[dict], Dict[str, int], int, int]:
     """
     Main scanner function: Find calendar spread opportunities with high forward factors.
 
@@ -822,23 +838,26 @@ async def scan(session: Session, tickers: List[str], pairs: List[Tuple[int, int]
         earnings_data: Optional earnings data dict from EarningsCache (default None)
 
     Returns:
-        List of dict rows with 31-column unified CSV schema:
-        - timestamp, symbol, structure
-        - call_ff, put_ff, combined_ff (FF metrics - primary sort key)
-        - spot_price, front_dte, back_dte, front_expiry, back_expiry
-        - atm_strike (ATM calendars only), call_strike, put_strike, call_delta, put_delta
-        - call_front_iv, call_back_iv, call_fwd_iv (call leg IVs)
-        - put_front_iv, put_back_iv, put_fwd_iv (put leg IVs)
-        - earnings_conflict, earnings_date
-        - liquidity_rating, liquidity_value
-        - iv_source_call_front, iv_source_call_back (call leg IV sources: "xearn" or "greeks")
-        - iv_source_put_front, iv_source_put_back (put leg IV sources)
-        - earnings_source (data source: "cache", "yahoo", "tastytrade", "none", or "skipped")
-
-        For ATM calendars: call and put IVs are from same strike (may differ slightly)
-        For double calendars: call and put IVs are from different strikes (+35Δ vs -35Δ)
-
-        Sorted by combined_ff descending, then symbol ascending.
+        Tuple of (rows, skip_stats, scanned, passed):
+        - rows: List of dict rows with 32-column unified CSV schema:
+          - timestamp, symbol, structure
+          - call_ff, put_ff, combined_ff (FF metrics - primary sort key)
+          - spot_price, front_dte, back_dte, front_expiry, back_expiry
+          - atm_strike (ATM calendars only), call_strike, put_strike, call_delta, put_delta
+          - call_front_iv, call_back_iv, call_fwd_iv (call leg IVs)
+          - put_front_iv, put_back_iv, put_fwd_iv (put leg IVs)
+          - earnings_conflict, earnings_date
+          - liquidity_rating, liquidity_value
+          - iv_source_call_front, iv_source_call_back (call leg IV sources: "xearn" or "greeks")
+          - iv_source_put_front, iv_source_put_back (put leg IV sources)
+          - earnings_source (data source: "cache", "yahoo", "tastytrade", "none", or "skipped")
+          - skip_reason (empty string if not skipped)
+          For ATM calendars: call and put IVs are from same strike (may differ slightly)
+          For double calendars: call and put IVs are from different strikes (+35Δ vs -35Δ)
+          Sorted by combined_ff descending, then symbol ascending.
+        - skip_stats: Dict[str, int] mapping skip reasons to counts
+        - scanned: int total symbols scanned
+        - passed: int opportunities that met FF threshold
 
     Raises:
         None (logs warnings for failures, continues processing remaining symbols)
@@ -858,10 +877,27 @@ async def scan(session: Session, tickers: List[str], pairs: List[Tuple[int, int]
     today = ny_today()
     timestamp = datetime.now(UTC).isoformat()  # ISO 8601 UTC timestamp
 
+    # Skip statistics tracking
+    skip_stats = {
+        SKIP_NONPOSITIVE_FWD_VAR: 0,
+        SKIP_MISSING_IV: 0,
+        SKIP_EXPIRY_MISMATCH: 0,
+        SKIP_DELTA_NOT_FOUND: 0,
+        SKIP_EARNINGS_CONFLICT: 0,
+        SKIP_LOW_LIQUIDITY: 0,
+        SKIP_NO_QUOTE: 0,
+        SKIP_NO_CHAIN: 0,
+        SKIP_BOTH_LEGS_REQUIRED: 0,
+        SKIP_BELOW_FF_THRESHOLD: 0,
+    }
+    scanned = 0
+    passed = 0
+
     # Fetch market metrics for all symbols upfront (batched)
     market_metrics = fetch_market_metrics(session, tickers)
 
     for idx, sym in enumerate(tickers):
+        scanned += 1
         # Add small delay between symbols to avoid rate limiting (except for first symbol)
         if idx > 0:
             await asyncio.sleep(0.5)  # 500ms delay between symbols
@@ -871,6 +907,8 @@ async def scan(session: Session, tickers: List[str], pairs: List[Tuple[int, int]
             # For futures, get spot from Yahoo Finance (tastytrade doesn't provide futures prices)
             spot = get_futures_spot_price(sym)
             if spot is None:
+                skip_stats[SKIP_NO_QUOTE] += 1
+                logger.debug(f"Skipping {sym}: {SKIP_NO_QUOTE}")
                 print(f"[WARN] No quote available for {sym}, skipping.", file=sys.stderr)
                 continue
         else:
@@ -878,10 +916,14 @@ async def scan(session: Session, tickers: List[str], pairs: List[Tuple[int, int]
             try:
                 md = get_market_data(session, sym, InstrumentType.EQUITY)
                 if md is None or md.last is None:
+                    skip_stats[SKIP_NO_QUOTE] += 1
+                    logger.debug(f"Skipping {sym}: {SKIP_NO_QUOTE}")
                     print(f"[WARN] No quote for {sym}, skipping.", file=sys.stderr)
                     continue
                 spot = float(md.last) if md.last is not None else float(md.mark)
             except Exception as e:
+                skip_stats[SKIP_NO_QUOTE] += 1
+                logger.debug(f"Skipping {sym}: {SKIP_NO_QUOTE} (error: {e})")
                 print(f"[WARN] Could not get market data for {sym}: {e}, skipping.", file=sys.stderr)
                 continue
 
@@ -906,6 +948,8 @@ async def scan(session: Session, tickers: List[str], pairs: List[Tuple[int, int]
             # For futures, use NestedFutureOptionChain and extract option_chains
             futures_chain = NestedFutureOptionChain.get(session, sym)
             if not futures_chain or not futures_chain.option_chains:
+                skip_stats[SKIP_NO_CHAIN] += 1
+                logger.debug(f"Skipping {sym}: {SKIP_NO_CHAIN}")
                 print(f"[WARN] No option chain for {sym}, skipping.", file=sys.stderr)
                 continue
             chain = futures_chain.option_chains[0]  # Get the first option chain
@@ -913,6 +957,8 @@ async def scan(session: Session, tickers: List[str], pairs: List[Tuple[int, int]
             # For equity, use NestedOptionChain
             chain_list = NestedOptionChain.get(session, sym)
             if not chain_list:
+                skip_stats[SKIP_NO_CHAIN] += 1
+                logger.debug(f"Skipping {sym}: {SKIP_NO_CHAIN}")
                 print(f"[WARN] No option chain for {sym}, skipping.", file=sys.stderr)
                 continue
             chain = chain_list[0]  # API returns a list; take first element
@@ -929,6 +975,8 @@ async def scan(session: Session, tickers: List[str], pairs: List[Tuple[int, int]
         if max_back_exp and skip_earnings and not is_futures_symbol(sym):
             passes, reason = check_earnings_conflict(sym, market_metrics, max_back_exp, today)
             if not passes:
+                skip_stats[SKIP_EARNINGS_CONFLICT] += 1
+                logger.debug(f"Skipping {sym}: {SKIP_EARNINGS_CONFLICT} - {reason}")
                 print(f"[FILTERED] {sym}: {reason}", file=sys.stderr)
                 if show_earnings_conflicts:
                     # Note: We'd compute FF here if we had the data, but skipping for simplicity
@@ -938,6 +986,8 @@ async def scan(session: Session, tickers: List[str], pairs: List[Tuple[int, int]
         if not skip_liquidity_check:
             passes, reason = check_liquidity(sym, market_metrics, min_liquidity_rating)
             if not passes:
+                skip_stats[SKIP_LOW_LIQUIDITY] += 1
+                logger.debug(f"Skipping {sym}: {SKIP_LOW_LIQUIDITY} - {reason}")
                 print(f"[INFO] {sym}: {reason}, skipping", file=sys.stderr)
                 continue
 
@@ -1002,6 +1052,25 @@ async def scan(session: Session, tickers: List[str], pairs: List[Tuple[int, int]
 
                 # Skip if we don't have BOTH call and put calendars
                 if not (has_call_calendar and has_put_calendar):
+                    skip_stats[SKIP_BOTH_LEGS_REQUIRED] += 1
+                    logger.debug(f"Skipping {sym} double {front}-{back}: {SKIP_BOTH_LEGS_REQUIRED}")
+                    continue
+
+                # Validate inputs before calculating forward IV
+                call_skip_reason = validate_ff_inputs(
+                    front_call.iv, back_call.iv, front_choice["dte"], back_choice["dte"]
+                )
+                if call_skip_reason:
+                    skip_stats[SKIP_NONPOSITIVE_FWD_VAR] += 1
+                    logger.debug(f"Skipping {sym} double {front}-{back} call: {call_skip_reason}")
+                    continue
+
+                put_skip_reason = validate_ff_inputs(
+                    front_put.iv, back_put.iv, front_choice["dte"], back_choice["dte"]
+                )
+                if put_skip_reason:
+                    skip_stats[SKIP_NONPOSITIVE_FWD_VAR] += 1
+                    logger.debug(f"Skipping {sym} double {front}-{back} put: {put_skip_reason}")
                     continue
 
                 # Calculate FFs for both legs
@@ -1009,6 +1078,8 @@ async def scan(session: Session, tickers: List[str], pairs: List[Tuple[int, int]
                 fwd_put = forward_iv(front_put.iv, back_put.iv, front_choice["dte"], back_choice["dte"])
 
                 if fwd_call is None or fwd_call <= 0 or fwd_put is None or fwd_put <= 0:
+                    skip_stats[SKIP_NONPOSITIVE_FWD_VAR] += 1
+                    logger.debug(f"Skipping {sym} double {front}-{back}: negative forward IV")
                     continue
 
                 ff_call = (front_call.iv - fwd_call) / fwd_call
@@ -1081,6 +1152,7 @@ async def scan(session: Session, tickers: List[str], pairs: List[Tuple[int, int]
 
                 # Filter on combined_ff
                 if combined_ff >= min_ff or show_all_scans:
+                    passed += 1
                     rows.append({
                         "timestamp": timestamp,
                         "symbol": sym,
@@ -1112,7 +1184,8 @@ async def scan(session: Session, tickers: List[str], pairs: List[Tuple[int, int]
                         "iv_source_call_back": call_iv_source_back,
                         "iv_source_put_front": put_iv_source_front,
                         "iv_source_put_back": put_iv_source_back,
-                        "earnings_source": earnings_source
+                        "earnings_source": earnings_source,
+                        "skip_reason": ""
                     })
 
         if scan_atm:
@@ -1212,15 +1285,32 @@ async def scan(session: Session, tickers: List[str], pairs: List[Tuple[int, int]
                 put_iv_f = put_iv_by_target[front]
                 put_iv_b = put_iv_by_target[back]
 
+                # Validate inputs before calculating forward IV
+                call_skip_reason = validate_ff_inputs(call_iv_f, call_iv_b, front_choice.dte, back_choice.dte)
+                if call_skip_reason:
+                    skip_stats[SKIP_NONPOSITIVE_FWD_VAR] += 1
+                    logger.debug(f"Skipping {sym} ATM {front}-{back} call: {call_skip_reason}")
+                    continue
+
+                put_skip_reason = validate_ff_inputs(put_iv_f, put_iv_b, front_choice.dte, back_choice.dte)
+                if put_skip_reason:
+                    skip_stats[SKIP_NONPOSITIVE_FWD_VAR] += 1
+                    logger.debug(f"Skipping {sym} ATM {front}-{back} put: {put_skip_reason}")
+                    continue
+
                 # Calculate call FF
                 call_fwd = forward_iv(call_iv_f, call_iv_b, front_choice.dte, back_choice.dte)
                 if call_fwd is None or call_fwd <= 0:
+                    skip_stats[SKIP_NONPOSITIVE_FWD_VAR] += 1
+                    logger.debug(f"Skipping {sym} ATM {front}-{back}: negative call forward IV")
                     continue
                 call_ff = (call_iv_f - call_fwd) / call_fwd
 
                 # Calculate put FF
                 put_fwd = forward_iv(put_iv_f, put_iv_b, front_choice.dte, back_choice.dte)
                 if put_fwd is None or put_fwd <= 0:
+                    skip_stats[SKIP_NONPOSITIVE_FWD_VAR] += 1
+                    logger.debug(f"Skipping {sym} ATM {front}-{back}: negative put forward IV")
                     continue
                 put_ff = (put_iv_f - put_fwd) / put_fwd
 
@@ -1235,6 +1325,7 @@ async def scan(session: Session, tickers: List[str], pairs: List[Tuple[int, int]
 
                 # Include result if: (1) meets FF threshold, OR (2) show_all_scans is enabled
                 if combined_ff >= min_ff or show_all_scans:
+                    passed += 1
                     rows.append({
                         "timestamp": timestamp,
                         "symbol": sym,
@@ -1266,12 +1357,15 @@ async def scan(session: Session, tickers: List[str], pairs: List[Tuple[int, int]
                         "iv_source_call_back": call_iv_src_back,
                         "iv_source_put_front": put_iv_src_front,
                         "iv_source_put_back": put_iv_src_back,
-                        "earnings_source": earnings_source
+                        "earnings_source": earnings_source,
+                        "skip_reason": ""
                     })
 
     # Sort by combined_ff descending (highest FF first), then by symbol ascending
     rows.sort(key=lambda r: (-r["combined_ff"], r["symbol"]))
-    return rows
+
+    # Return rows and statistics
+    return rows, skip_stats, scanned, passed
 
 def read_list_arg(values: List[str]) -> List[str]:
     """
@@ -1484,7 +1578,7 @@ Examples:
     # Default: filter earnings (unless --allow-earnings flag is set)
     skip_earnings_flag = not args.allow_earnings
 
-    rows = asyncio.run(scan(
+    rows, skip_stats, scanned, passed = asyncio.run(scan(
         session, tickers, pairs, args.min_ff, args.dte_tolerance, args.timeout,
         skip_earnings=skip_earnings_flag,
         min_liquidity_rating=args.min_liquidity_rating,
@@ -1498,7 +1592,7 @@ Examples:
         earnings_data=earnings_data
     ))
 
-    # Unified 31-column CSV schema
+    # Unified 32-column CSV schema
     cols = [
         "timestamp", "symbol", "structure",
         "call_ff", "put_ff", "combined_ff",
@@ -1511,7 +1605,8 @@ Examples:
         "liquidity_rating", "liquidity_value",
         "iv_source_call_front", "iv_source_call_back",
         "iv_source_put_front", "iv_source_put_back",
-        "earnings_source"
+        "earnings_source",
+        "skip_reason"
     ]
 
     if not rows:
@@ -1534,6 +1629,18 @@ Examples:
             w.writeheader()
             w.writerows(rows)
         print(f"Wrote CSV -> {args.csv_out}", file=sys.stderr)
+
+    # Print scan summary statistics
+    total_skipped = sum(skip_stats.values())
+    print(f"\n=== Scan Summary ===", file=sys.stderr)
+    print(f"Scanned: {scanned} symbols", file=sys.stderr)
+    print(f"Passed: {passed} opportunities", file=sys.stderr)
+    print(f"Skipped: {total_skipped} symbols", file=sys.stderr)
+    if total_skipped > 0:
+        print(f"\nSkip breakdown:", file=sys.stderr)
+        for reason, count in skip_stats.items():
+            if count > 0:
+                print(f"  - {reason}: {count}", file=sys.stderr)
 
 if __name__ == "__main__":
     main()

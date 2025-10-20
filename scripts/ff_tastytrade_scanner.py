@@ -116,7 +116,7 @@ class SymbolFormatter(logging.Formatter):
             return msg
 
 
-def setup_logging(mode: str) -> logging.Logger:
+def setup_logging(mode: str, log_file: Optional[str] = None) -> logging.Logger:
     """
     Configure hierarchical logging system for the scanner.
 
@@ -133,6 +133,7 @@ def setup_logging(mode: str) -> logging.Logger:
             - "normal": INFO and above (default user mode)
             - "verbose": INFO and above (same as normal, reserved for future use)
             - "debug": All messages including DEBUG, with timestamps
+        log_file: Optional file path for logging output (receives ALL log levels)
 
     Returns:
         Root scanner logger instance
@@ -141,6 +142,12 @@ def setup_logging(mode: str) -> logging.Logger:
         quiet:  Minimal output, only errors
         normal: Clean [SYMBOL] STATUS format, INFO/WARN/ERROR
         debug:  Full timestamps + logger names, all DEBUG messages
+
+    File Logging:
+        - File receives ALL log levels (DEBUG and above) regardless of mode
+        - File output includes timestamps and logger names
+        - File is truncated on start (fresh log each run)
+        - Terminal output still respects mode (quiet/normal/verbose/debug)
 
     Side effects:
         - Clears existing handlers on scanner logger
@@ -175,6 +182,20 @@ def setup_logging(mode: str) -> logging.Logger:
 
     console.setFormatter(formatter)
     scanner_logger.addHandler(console)
+
+    # Add file handler if log_file provided
+    if log_file:
+        try:
+            # Truncate file on start (fresh log each run)
+            fh = logging.FileHandler(log_file, mode='w')
+            fh.setLevel(logging.DEBUG)  # File gets ALL levels
+            fh.setFormatter(logging.Formatter(
+                '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+            ))
+            scanner_logger.addHandler(fh)
+        except (IOError, PermissionError) as e:
+            # Log to console if file can't be created
+            scanner_logger.error(f"SCANNER: Failed to create log file {log_file}: {e}")
 
     # Suppress noisy third-party loggers
     logging.getLogger("yfinance").setLevel(logging.ERROR)  # No HTTP 404 spam
@@ -1892,6 +1913,8 @@ Examples:
                     help="Quiet mode: suppress per-symbol output, show only summary and errors.")
     ap.add_argument("--verbose", action="store_true",
                     help="Verbose mode: show ALL symbols (pass, filter, skip, error).")
+    ap.add_argument("--log-file", type=str, metavar='PATH',
+                    help='Write all logs to file with timestamps (enables "tee" functionality).')
 
     args = ap.parse_args()
     tickers = read_list_arg(args.tickers)
@@ -1912,8 +1935,8 @@ Examples:
     else:
         mode = "normal"
 
-    # Setup hierarchical logging system (Issue #38)
-    scanner_logger = setup_logging(mode)
+    # Setup hierarchical logging system (Issue #38, #40)
+    scanner_logger = setup_logging(mode, log_file=args.log_file)
 
     # Validate flag values
     if args.delta_tolerance < 0.01 or args.delta_tolerance > 0.10:

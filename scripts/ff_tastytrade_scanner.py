@@ -1324,8 +1324,8 @@ Examples:
     if not args.allow_earnings:
         start_time = time.time()
 
-        # Initialize cache
-        cache = EarningsCache()
+        # Initialize cache with TastyTrade session for fallback (Issue #17)
+        cache = EarningsCache(session=session)
 
         # Batch fetch earnings for all symbols
         earnings_data = cache.batch_get_earnings(tickers)

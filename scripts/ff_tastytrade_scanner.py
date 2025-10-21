@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-# ff_tastytrade_scanner.py
+# ff_tastytrade_scanner.py - v3.0 (CSV schema refactor)
 # A forward-volatility (FF) scanner that uses the official tastytrade API + dxFeed streamer.
 # It fetches ATM IV for two expirations (closest to target DTEs), computes forward IV,
 # and reports FF = (FrontATMIV - FwdIV) / FwdIV for each requested ticker.
@@ -27,7 +27,6 @@ import os
 import sys
 import math
 import json
-import csv
 import asyncio
 import argparse
 import logging
@@ -45,80 +44,9 @@ from tastytrade.dxfeed import Greeks, Quote
 from tastytrade.utils import today_in_new_york
 
 import yfinance as yf
+import pydantic
 
 from earnings_cache import EarningsCache
-
-# ---------- Streaming CSV Writer ----------
-class StreamingCSVWriter:
-    """
-    Memory-efficient streaming CSV writer for large scans.
-
-    Writes rows immediately as they're produced rather than buffering in memory.
-    This reduces memory usage from O(n) to O(1) for symbol results and makes
-    CSV files available for inspection while scan is in progress.
-
-    Features:
-    - Automatic header writing on first row
-    - Immediate flush after each row for real-time visibility
-    - Context manager support for automatic file closing
-    - Error handling prevents partial/corrupted files
-
-    Usage:
-        with StreamingCSVWriter('output.csv', columns) as writer:
-            for row in results:
-                writer.writerow(row)
-    """
-    def __init__(self, filepath: str, fieldnames: List[str]):
-        """
-        Initialize streaming CSV writer.
-
-        Args:
-            filepath: Path to output CSV file
-            fieldnames: List of column names for CSV header
-        """
-        self.filepath = filepath
-        self.fieldnames = fieldnames
-        self.file = None
-        self.writer = None
-        self._row_count = 0
-
-    def __enter__(self):
-        """Open file and write header."""
-        self.file = open(self.filepath, 'w', newline='', encoding='utf-8')
-        self.writer = csv.DictWriter(self.file, fieldnames=self.fieldnames)
-        self.writer.writeheader()
-        self.file.flush()  # Ensure header is visible immediately
-        return self
-
-    def __exit__(self, exc_type, exc_val, exc_tb):
-        """Close file, handling errors gracefully."""
-        if self.file:
-            try:
-                self.file.close()
-            except Exception as e:
-                # Note: logger may not be configured yet, but it's defined below
-                pass  # Silently handle close errors
-
-        return False  # Don't suppress exceptions
-
-    def writerow(self, row: dict):
-        """
-        Write a single row to CSV and flush immediately.
-
-        Args:
-            row: Dictionary mapping field names to values
-        """
-        if self.writer is None:
-            raise RuntimeError("StreamingCSVWriter not initialized - use as context manager")
-
-        self.writer.writerow(row)
-        self.file.flush()  # Flush immediately for real-time visibility
-        self._row_count += 1
-
-    @property
-    def row_count(self) -> int:
-        """Return number of rows written (excluding header)."""
-        return self._row_count
 
 # ---------- Skip Reason Constants ----------
 # Used to track why symbols are skipped during scans
@@ -130,6 +58,7 @@ SKIP_EARNINGS_CONFLICT = "earnings_conflict"
 SKIP_VOLUME_TOO_LOW = "volume_too_low"
 SKIP_NO_QUOTE = "no_quote"
 SKIP_NO_CHAIN = "no_chain"
+SKIP_INVALID_CHAIN = "invalid_chain_data"
 SKIP_BOTH_LEGS_REQUIRED = "both_legs_required"
 SKIP_BELOW_FF_THRESHOLD = "below_ff_threshold"
 
@@ -140,6 +69,156 @@ ATM_DELTA_TARGET = 0.50
 # Maximum delta deviation from target when selecting ATM strikes
 # If no strikes within ±0.10Δ of target, fallback to nearest-spot logic
 ATM_DELTA_TOLERANCE = 0.10
+
+# ---------- Logging Setup ----------
+
+class SymbolFormatter(logging.Formatter):
+    """
+    Custom formatter for symbol-based log messages.
+
+    Formats messages as: [SYMBOL] STATUS: details
+
+    Expected message format: "SYMBOL: message text"
+    If no colon found, returns message as-is.
+
+    Status mapping:
+        DEBUG   -> DEBUG
+        INFO    -> INFO
+        WARNING -> WARN
+        ERROR   -> ERROR
+
+    Example:
+        Input:  logger.info("SPY: Forward factor 0.285")
+        Output: [SPY   ] INFO : Forward factor 0.285
+    """
+
+    def format(self, record):
+        msg = str(record.msg) % record.args if record.args else str(record.msg)
+
+        # Extract symbol from message (format: "SYMBOL: message")
+        if ':' in msg:
+            parts = msg.split(':', 1)
+            symbol = parts[0].strip()
+            message = parts[1].strip()
+
+            # Map log level to status keyword
+            status_map = {
+                'DEBUG': 'DEBUG',
+                'INFO': 'INFO',
+                'WARNING': 'WARN',
+                'ERROR': 'ERROR'
+            }
+            status = status_map.get(record.levelname, record.levelname[:5].upper())
+
+            # Format: [SYMBOL] STATUS: message
+            # Pad symbol to 6 chars, status to 5 chars for alignment
+            return f"[{symbol:6}] {status:5}: {message}"
+        else:
+            # No symbol prefix, return as-is
+            return msg
+
+
+def setup_logging(mode: str, log_file: Optional[str] = None) -> logging.Logger:
+    """
+    Configure hierarchical logging system for the scanner.
+
+    Creates a logger hierarchy:
+        - scanner (root)
+        - scanner.earnings
+        - scanner.market_data
+        - scanner.greeks
+        - scanner.quality
+
+    Args:
+        mode: Logging mode, one of:
+            - "quiet": Only ERROR messages
+            - "normal": INFO and above (default user mode)
+            - "verbose": INFO and above (same as normal, reserved for future use)
+            - "debug": All messages including DEBUG, with timestamps
+        log_file: Optional file path for logging output (receives ALL log levels)
+
+    Returns:
+        Root scanner logger instance
+
+    Modes:
+        quiet:  Minimal output, only errors
+        normal: Clean [SYMBOL] STATUS format, INFO/WARN/ERROR
+        debug:  Full timestamps + logger names, all DEBUG messages
+
+    File Logging:
+        - File receives ALL log levels (DEBUG and above) regardless of mode
+        - File output includes timestamps and logger names
+        - File is truncated on start (fresh log each run)
+        - Terminal output still respects mode (quiet/normal/verbose/debug)
+
+    Side effects:
+        - Clears existing handlers on scanner logger
+        - Suppresses yfinance logger to ERROR level (no HTTP 404 spam)
+        - Suppresses tastytrade, httpx, earnings_cache to WARNING
+    """
+    # Create root scanner logger
+    scanner_logger = logging.getLogger("scanner")
+    scanner_logger.handlers = []  # Clear existing handlers
+    scanner_logger.propagate = False  # Don't propagate to root logger
+
+    # Set level based on mode
+    # If log_file is provided, set logger to DEBUG so file handler receives all messages
+    # Console handler will still filter based on mode
+    if log_file:
+        scanner_logger.setLevel(logging.DEBUG)  # Logger must accept all levels for file
+    elif mode == "quiet":
+        scanner_logger.setLevel(logging.ERROR)
+    elif mode == "debug":
+        scanner_logger.setLevel(logging.DEBUG)
+    else:  # normal, verbose
+        scanner_logger.setLevel(logging.INFO)
+
+    # Create console handler
+    console = logging.StreamHandler(sys.stderr)
+
+    # Set console handler level based on mode (independent of logger level)
+    if mode == "quiet":
+        console.setLevel(logging.ERROR)
+    elif mode == "debug":
+        console.setLevel(logging.DEBUG)
+    else:  # normal, verbose
+        console.setLevel(logging.INFO)
+
+    # Choose formatter based on mode
+    if mode == "debug":
+        # Debug mode: timestamps and logger names for troubleshooting
+        formatter = logging.Formatter(
+            '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+        )
+    else:
+        # Normal/verbose/quiet: clean symbol-based format
+        formatter = SymbolFormatter()
+
+    console.setFormatter(formatter)
+    scanner_logger.addHandler(console)
+
+    # Add file handler if log_file provided
+    if log_file:
+        try:
+            # Truncate file on start (fresh log each run)
+            fh = logging.FileHandler(log_file, mode='w')
+            fh.setLevel(logging.DEBUG)  # File gets ALL levels
+            fh.setFormatter(logging.Formatter(
+                '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+            ))
+            scanner_logger.addHandler(fh)
+        except (IOError, PermissionError) as e:
+            # Log to console if file can't be created
+            scanner_logger.error(f"SCANNER: Failed to create log file {log_file}: {e}")
+
+    # Suppress noisy third-party loggers
+    logging.getLogger("yfinance").setLevel(logging.ERROR)  # No HTTP 404 spam
+    logging.getLogger("tastytrade").setLevel(logging.WARNING)
+    logging.getLogger("httpx").setLevel(logging.WARNING)
+    logging.getLogger("earnings_cache").setLevel(logging.WARNING)
+
+    return scanner_logger
+
 
 # ---------- Logger ----------
 logger = logging.getLogger(__name__)
@@ -286,10 +365,11 @@ def get_futures_spot_price(symbol: str) -> Optional[float]:
         >>> print(f'/ES spot: {price}')
         /ES spot: 5921.50
     """
+    market_logger = logging.getLogger("scanner.market_data")
     try:
         yahoo_symbol = tastytrade_to_yahoo_futures(symbol)
         if not yahoo_symbol:
-            print(f"[WARN] Unknown futures symbol {symbol}, no Yahoo Finance mapping", file=sys.stderr)
+            market_logger.warning(f"{symbol}: Unknown futures symbol, no Yahoo Finance mapping")
             return None
 
         # Fetch current price from Yahoo Finance
@@ -305,11 +385,11 @@ def get_futures_spot_price(symbol: str) -> Optional[float]:
         if not hist.empty:
             return float(hist['Close'].iloc[-1])
 
-        print(f"[WARN] No price data available for {yahoo_symbol}", file=sys.stderr)
+        market_logger.warning(f"{yahoo_symbol}: No price data available")
         return None
 
     except Exception as e:
-        print(f"[WARN] Could not get futures spot price for {symbol}: {e}", file=sys.stderr)
+        market_logger.warning(f"{symbol}: Could not get futures spot price - {e}")
         return None
 
 @dataclass(frozen=True)
@@ -778,6 +858,7 @@ def fetch_market_metrics(session: Session, symbols: List[str]) -> Dict[str, any]
         >>> metrics['SPY'].earnings.expected_report_date
         date(2025, 10, 25)
     """
+    market_logger = logging.getLogger("scanner.market_data")
     try:
         metrics = get_market_metrics(session, symbols)
         if not metrics:
@@ -785,7 +866,7 @@ def fetch_market_metrics(session: Session, symbols: List[str]) -> Dict[str, any]
         # Convert list to dict for easy lookup
         return {m.symbol: m for m in metrics if m.symbol}
     except Exception as e:
-        print(f"[ERROR] Market metrics fetch failed: {e}", file=sys.stderr)
+        market_logger.error(f"ALL_SYMBOLS: Market metrics fetch failed - {e}")
         return {}
 
 def check_earnings_conflict(
@@ -824,9 +905,11 @@ def check_earnings_conflict(
         >>> check_earnings_conflict('AAPL', metrics, date(2025, 11, 15), date(2025, 10, 20))
         (True, None)
     """
+    earnings_logger = logging.getLogger("scanner.earnings")
+
     if symbol not in metrics:
         # No metrics data - log warning but allow through
-        print(f"[WARN] {symbol}: Market metrics unavailable, skipping earnings check", file=sys.stderr)
+        earnings_logger.warning(f"{symbol}: Market metrics unavailable, skipping earnings check")
         return (True, None)
 
     metric_info = metrics[symbol]
@@ -834,13 +917,13 @@ def check_earnings_conflict(
     # Check if earnings attribute exists
     earnings = getattr(metric_info, 'earnings', None)
     if earnings is None:
-        print(f"[WARN] {symbol}: Earnings data unavailable, skipping earnings check", file=sys.stderr)
+        earnings_logger.warning(f"{symbol}: Earnings data unavailable, skipping earnings check")
         return (True, None)
 
     # Get expected_report_date from earnings object
     earnings_date = getattr(earnings, 'expected_report_date', None)
     if earnings_date is None:
-        print(f"[WARN] {symbol}: Earnings date unavailable, skipping earnings check", file=sys.stderr)
+        earnings_logger.warning(f"{symbol}: Earnings date unavailable, skipping earnings check")
         return (True, None)
 
     # Check if earnings falls in the window
@@ -883,8 +966,10 @@ def check_liquidity_rating(
         >>> check_liquidity_rating('ILLIQUID', metrics, min_rating=3)
         (False, 'Liquidity rating 2 < 3')
     """
+    quality_logger = logging.getLogger("scanner.quality")
+
     if symbol not in metrics:
-        print(f"[WARN] {symbol}: Market metrics unavailable, skipping liquidity check", file=sys.stderr)
+        quality_logger.warning(f"{symbol}: Market metrics unavailable, skipping liquidity check")
         return (True, None)
 
     metric_info = metrics[symbol]
@@ -894,18 +979,18 @@ def check_liquidity_rating(
 
     # Handle futures symbols - allow through if rating field is missing
     if is_futures_symbol(symbol) and rating is None:
-        logger.debug(f"{symbol}: Futures symbol, liquidity check skipped (field missing)")
+        quality_logger.debug(f"{symbol}: Futures symbol, liquidity check skipped (field missing)")
         return (True, None)
 
     if rating is None:
-        print(f"[WARN] {symbol}: Liquidity rating unavailable, skipping liquidity check", file=sys.stderr)
+        quality_logger.warning(f"{symbol}: Liquidity rating unavailable, skipping liquidity check")
         return (True, None)
 
     # Convert to int if needed
     try:
         rating_int = int(rating)
     except (ValueError, TypeError):
-        print(f"[WARN] {symbol}: Invalid liquidity rating format, skipping liquidity check", file=sys.stderr)
+        quality_logger.warning(f"{symbol}: Invalid liquidity rating format, skipping liquidity check")
         return (True, None)
 
     if rating_int < min_rating:
@@ -947,14 +1032,16 @@ def check_option_volume(
         >>> check_option_volume('ILLIQUID', 5000, min_volume=10000)
         (False, 'Option volume 5000 < 10000')
     """
+    quality_logger = logging.getLogger("scanner.quality")
+
     # Handle missing volume data gracefully
     if option_volume is None:
-        print(f"[WARN] {symbol}: Option volume unavailable (may need market hours), skipping volume check", file=sys.stderr)
+        quality_logger.warning(f"{symbol}: Option volume unavailable (may need market hours), skipping volume check")
         return (True, None)
 
     # Handle futures symbols - allow through if volume is 0 or missing
     if is_futures_symbol(symbol) and option_volume == 0:
-        logger.debug(f"{symbol}: Futures symbol with zero volume, check skipped")
+        quality_logger.debug(f"{symbol}: Futures symbol with zero volume, check skipped")
         return (True, None)
 
     if option_volume < min_volume:
@@ -1017,9 +1104,8 @@ async def scan(session: Session, tickers: List[str], pairs: List[Tuple[int, int]
                skip_earnings: bool = True, options_volume_threshold: Optional[float] = None,
                skip_liquidity_check: bool = False, show_earnings_conflicts: bool = False,
                show_all_scans: bool = False, structure: str = "both",
-               delta_tolerance: float = 0.05, use_exearn_iv: bool = False,
-               earnings_data: Optional[Dict[str, dict]] = None,
-               csv_writer: Optional[StreamingCSVWriter] = None) -> Tuple[List[dict], Dict[str, int], int, int]:
+               delta_tolerance: float = 0.05, earnings_data: Optional[Dict[str, dict]] = None,
+               verbose: bool = False) -> Tuple[List[dict], Dict[str, int], int, int]:
     """
     Main scanner function: Find calendar spread opportunities with high forward factors.
 
@@ -1051,11 +1137,8 @@ async def scan(session: Session, tickers: List[str], pairs: List[Tuple[int, int]
         show_all_scans: Show all results regardless of FF threshold (default False)
         structure: Calendar type: "atm-call", "double", or "both" (default "both")
         delta_tolerance: Max delta deviation for double calendars (default 0.05 = ±5Δ)
-        use_exearn_iv: Use ex-earn IV as primary source, skip Greeks streaming (default False)
         earnings_data: Optional earnings data dict from EarningsCache (default None)
-        csv_writer: Optional StreamingCSVWriter for memory-efficient output (default None).
-                   If provided, rows are written immediately as scan progresses (O(1) memory).
-                   If None, rows are accumulated in memory for terminal output (O(n) memory).
+        verbose: If True, log ALL symbols (pass, filter, skip, error) for verbose mode (default False)
 
     Returns:
         Tuple of (rows, skip_stats, scanned, passed):
@@ -1126,14 +1209,22 @@ async def scan(session: Session, tickers: List[str], pairs: List[Tuple[int, int]
         if idx > 0:
             await asyncio.sleep(0.5)  # 500ms delay between symbols
 
+        # Initialize sub-loggers for this symbol
+        market_logger = logging.getLogger("scanner.market_data")
+        greeks_logger = logging.getLogger("scanner.greeks")
+        quality_logger = logging.getLogger("scanner.quality")
+
         # 1) Underlying spot - handle futures vs equity
         if is_futures_symbol(sym):
             # For futures, get spot from Yahoo Finance (tastytrade doesn't provide futures prices)
             spot = get_futures_spot_price(sym)
             if spot is None:
                 skip_stats[SKIP_NO_QUOTE] += 1
-                logger.debug(f"Skipping {sym}: {SKIP_NO_QUOTE}")
-                print(f"[WARN] No quote available for {sym}, skipping.", file=sys.stderr)
+                market_logger.debug(f"{sym}: Skipping - {SKIP_NO_QUOTE}")
+                if verbose:
+                    market_logger.info(f"{sym}: SKIP - No quote available (futures)")
+                else:
+                    market_logger.warning(f"{sym}: No quote available, skipping")
                 continue
         else:
             # For equity, use standard equity market data
@@ -1141,14 +1232,20 @@ async def scan(session: Session, tickers: List[str], pairs: List[Tuple[int, int]
                 md = get_market_data(session, sym, InstrumentType.EQUITY)
                 if md is None or md.last is None:
                     skip_stats[SKIP_NO_QUOTE] += 1
-                    logger.debug(f"Skipping {sym}: {SKIP_NO_QUOTE}")
-                    print(f"[WARN] No quote for {sym}, skipping.", file=sys.stderr)
+                    market_logger.debug(f"{sym}: Skipping - {SKIP_NO_QUOTE}")
+                    if verbose:
+                        market_logger.info(f"{sym}: SKIP - No quote available")
+                    else:
+                        market_logger.warning(f"{sym}: No quote available, skipping")
                     continue
                 spot = float(md.last) if md.last is not None else float(md.mark)
             except Exception as e:
                 skip_stats[SKIP_NO_QUOTE] += 1
-                logger.debug(f"Skipping {sym}: {SKIP_NO_QUOTE} (error: {e})")
-                print(f"[WARN] Could not get market data for {sym}: {e}, skipping.", file=sys.stderr)
+                market_logger.debug(f"{sym}: Skipping - {SKIP_NO_QUOTE} (error: {e})")
+                if verbose:
+                    market_logger.info(f"{sym}: ERROR - Market data fetch failed ({e})")
+                else:
+                    market_logger.warning(f"{sym}: Could not get market data - {e}, skipping")
                 continue
 
         # 2) Extract earnings data and liquidity rating for this symbol
@@ -1176,32 +1273,52 @@ async def scan(session: Session, tickers: List[str], pairs: List[Tuple[int, int]
                 underlying_event = await snapshot_underlying(session, sym, timeout_s=timeout_s)
                 if underlying_event is not None:
                     option_volume = underlying_event.option_volume
-                    logger.info(f"{sym}: Option volume today: {option_volume}")
+                    market_logger.info(f"{sym}: Option volume today: {option_volume}")
                 else:
-                    logger.warning(f"{sym}: No Underlying event received")
+                    market_logger.warning(f"{sym}: No Underlying event received")
             except Exception as e:
-                logger.warning(f"{sym}: Failed to fetch Underlying event: {e}")
+                market_logger.warning(f"{sym}: Failed to fetch Underlying event: {e}")
                 option_volume = None
 
         # 3) Chain (nested) - handle futures vs equity
-        if is_futures_symbol(sym):
-            # For futures, use NestedFutureOptionChain and extract option_chains
-            futures_chain = NestedFutureOptionChain.get(session, sym)
-            if not futures_chain or not futures_chain.option_chains:
-                skip_stats[SKIP_NO_CHAIN] += 1
-                logger.debug(f"Skipping {sym}: {SKIP_NO_CHAIN}")
-                print(f"[WARN] No option chain for {sym}, skipping.", file=sys.stderr)
-                continue
-            chain = futures_chain.option_chains[0]  # Get the first option chain
-        else:
-            # For equity, use NestedOptionChain
-            chain_list = NestedOptionChain.get(session, sym)
-            if not chain_list:
-                skip_stats[SKIP_NO_CHAIN] += 1
-                logger.debug(f"Skipping {sym}: {SKIP_NO_CHAIN}")
-                print(f"[WARN] No option chain for {sym}, skipping.", file=sys.stderr)
-                continue
-            chain = chain_list[0]  # API returns a list; take first element
+        try:
+            if is_futures_symbol(sym):
+                # For futures, use NestedFutureOptionChain and extract option_chains
+                futures_chain = NestedFutureOptionChain.get(session, sym)
+                if not futures_chain or not futures_chain.option_chains:
+                    skip_stats[SKIP_NO_CHAIN] += 1
+                    market_logger.debug(f"{sym}: Skipping - {SKIP_NO_CHAIN}")
+                    if verbose:
+                        market_logger.info(f"{sym}: SKIP - No option chain available (futures)")
+                    else:
+                        market_logger.warning(f"{sym}: No option chain, skipping")
+                    continue
+                chain = futures_chain.option_chains[0]  # Get the first option chain
+            else:
+                # For equity, use NestedOptionChain
+                chain_list = NestedOptionChain.get(session, sym)
+                if not chain_list:
+                    skip_stats[SKIP_NO_CHAIN] += 1
+                    market_logger.debug(f"{sym}: Skipping - {SKIP_NO_CHAIN}")
+                    if verbose:
+                        market_logger.info(f"{sym}: SKIP - No option chain available")
+                    else:
+                        market_logger.warning(f"{sym}: No option chain, skipping")
+                    continue
+                chain = chain_list[0]  # API returns a list; take first element
+        except pydantic.ValidationError as e:
+            skip_stats[SKIP_INVALID_CHAIN] += 1
+            market_logger.debug(f"{sym}: Skipping - {SKIP_INVALID_CHAIN}")
+            if verbose:
+                market_logger.info(f"{sym}: SKIP - Invalid option chain data (Pydantic validation failed)")
+            else:
+                market_logger.warning(f"{sym}: Invalid option chain data (Pydantic validation failed), skipping")
+            continue
+        except Exception as e:
+            skip_stats[SKIP_NO_CHAIN] += 1
+            market_logger.debug(f"{sym}: Skipping - {SKIP_NO_CHAIN}")
+            market_logger.error(f"{sym}: Failed to fetch option chain ({type(e).__name__}: {e}), skipping")
+            continue
 
         # Pre-index expirations by date for fast lookup
         exp_by_date = {exp.expiration_date: exp for exp in chain.expirations}
@@ -1216,8 +1333,11 @@ async def scan(session: Session, tickers: List[str], pairs: List[Tuple[int, int]
             passes, reason = check_earnings_conflict(sym, market_metrics, max_back_exp, today)
             if not passes:
                 skip_stats[SKIP_EARNINGS_CONFLICT] += 1
-                logger.debug(f"Skipping {sym}: {SKIP_EARNINGS_CONFLICT} - {reason}")
-                print(f"[FILTERED] {sym}: {reason}", file=sys.stderr)
+                quality_logger.debug(f"{sym}: Skipping - {SKIP_EARNINGS_CONFLICT} - {reason}")
+                if verbose:
+                    quality_logger.info(f"{sym}: FILTER - Earnings conflict ({reason})")
+                else:
+                    quality_logger.info(f"{sym}: FILTER - {reason}")
                 if show_earnings_conflicts:
                     # Note: We'd compute FF here if we had the data, but skipping for simplicity
                     filtered_rows.append({"symbol": sym, "reason": reason})
@@ -1230,16 +1350,20 @@ async def scan(session: Session, tickers: List[str], pairs: List[Tuple[int, int]
                 passes, reason = check_option_volume(sym, option_volume, options_volume_threshold)
                 if not passes:
                     skip_stats[SKIP_VOLUME_TOO_LOW] += 1
-                    logger.info(f"{sym}: {reason}")
-                    print(f"[FILTERED] {sym}: {reason}", file=sys.stderr)
+                    if verbose:
+                        quality_logger.info(f"{sym}: FILTER - {reason}")
+                    else:
+                        quality_logger.info(f"{sym}: FILTER - {reason}")
                     continue
             else:
                 # Mode 2: Use liquidity_rating from Market Metrics (24/7 available)
                 passes, reason = check_liquidity_rating(sym, market_metrics, min_rating=3)
                 if not passes:
                     skip_stats[SKIP_VOLUME_TOO_LOW] += 1  # Reuse same skip reason for both modes
-                    logger.info(f"{sym}: {reason}")
-                    print(f"[FILTERED] {sym}: {reason}", file=sys.stderr)
+                    if verbose:
+                        quality_logger.info(f"{sym}: FILTER - {reason}")
+                    else:
+                        quality_logger.info(f"{sym}: FILTER - {reason}")
                     continue
 
         # 4) Branch based on calendar structure mode
@@ -1260,28 +1384,20 @@ async def scan(session: Session, tickers: List[str], pairs: List[Tuple[int, int]
                     continue
                 exp_obj = exp_by_date[exp_date]
 
-                # Conditionally fetch Greeks or use ex-earn IV
-                if use_exearn_iv:
-                    # Skip Greeks streaming when --iv-ex-earn flag enabled
-                    logger.info(f"{sym}: Using ex-earn IV for double calendar (--iv-ex-earn flag enabled)")
-                    # Double calendar requires delta-based selection which needs Greeks
-                    # Skip double calendars when using ex-earn IV (not supported)
-                    delta_strikes = {"call_35delta": None, "put_35delta": None}
-                else:
-                    # Get ±35Δ strikes using Greeks
-                    try:
-                        delta_strikes = await get_double_calendar_strikes(
-                            session=session,
-                            expiration_obj=exp_obj,
-                            spot=spot,
-                            call_target_delta=0.35,
-                            put_target_delta=-0.35,
-                            delta_tolerance=delta_tolerance,
-                            timeout_s=timeout_s
-                        )
-                    except Exception as e:
-                        logger.warning(f"Greeks streamer connection failed for {sym} {exp_date}: {e}. Skipping this expiration.")
-                        delta_strikes = {"call_35delta": None, "put_35delta": None}  # Both legs missing
+                # Get ±35Δ strikes
+                try:
+                    delta_strikes = await get_double_calendar_strikes(
+                        session=session,
+                        expiration_obj=exp_obj,
+                        spot=spot,
+                        call_target_delta=0.35,
+                        put_target_delta=-0.35,
+                        delta_tolerance=delta_tolerance,
+                        timeout_s=timeout_s
+                    )
+                except Exception as e:
+                    greeks_logger.warning(f"{sym} {exp_date}: Greeks streamer connection failed - {e}. Skipping expiration")
+                    delta_strikes = {"call_35delta": None, "put_35delta": None}  # Both legs missing
 
                 # Store with expiration info
                 delta_choices[target] = {
@@ -1292,7 +1408,10 @@ async def scan(session: Session, tickers: List[str], pairs: List[Tuple[int, int]
                 }
 
             if not delta_choices:
-                print(f"[WARN] No expirations matched tolerance for {sym}", file=sys.stderr)
+                if verbose:
+                    market_logger.info(f"{sym}: SKIP - No expirations matched tolerance")
+                else:
+                    market_logger.warning(f"{sym}: No expirations matched tolerance, skipping")
                 continue
 
             # Build rows for double calendar pairs
@@ -1316,7 +1435,7 @@ async def scan(session: Session, tickers: List[str], pairs: List[Tuple[int, int]
                 # Skip if we don't have BOTH call and put calendars
                 if not (has_call_calendar and has_put_calendar):
                     skip_stats[SKIP_BOTH_LEGS_REQUIRED] += 1
-                    logger.debug(f"Skipping {sym} double {front}-{back}: {SKIP_BOTH_LEGS_REQUIRED}")
+                    greeks_logger.debug(f"{sym} double {front}-{back}: Skipping - {SKIP_BOTH_LEGS_REQUIRED}")
                     continue
 
                 # Validate inputs before calculating forward IV
@@ -1325,7 +1444,7 @@ async def scan(session: Session, tickers: List[str], pairs: List[Tuple[int, int]
                 )
                 if call_skip_reason:
                     skip_stats[SKIP_NONPOSITIVE_FWD_VAR] += 1
-                    logger.debug(f"Skipping {sym} double {front}-{back} call: {call_skip_reason}")
+                    greeks_logger.debug(f"{sym} double {front}-{back} call: Skipping - {call_skip_reason}")
                     continue
 
                 put_skip_reason = validate_ff_inputs(
@@ -1333,7 +1452,7 @@ async def scan(session: Session, tickers: List[str], pairs: List[Tuple[int, int]
                 )
                 if put_skip_reason:
                     skip_stats[SKIP_NONPOSITIVE_FWD_VAR] += 1
-                    logger.debug(f"Skipping {sym} double {front}-{back} put: {put_skip_reason}")
+                    greeks_logger.debug(f"{sym} double {front}-{back} put: Skipping - {put_skip_reason}")
                     continue
 
                 # Calculate FFs for both legs
@@ -1342,7 +1461,7 @@ async def scan(session: Session, tickers: List[str], pairs: List[Tuple[int, int]
 
                 if fwd_call is None or fwd_call <= 0 or fwd_put is None or fwd_put <= 0:
                     skip_stats[SKIP_NONPOSITIVE_FWD_VAR] += 1
-                    logger.debug(f"Skipping {sym} double {front}-{back}: negative forward IV")
+                    greeks_logger.debug(f"{sym} double {front}-{back}: Skipping - negative forward IV")
                     continue
 
                 ff_call = (front_call.iv - fwd_call) / fwd_call
@@ -1369,48 +1488,48 @@ async def scan(session: Session, tickers: List[str], pairs: List[Tuple[int, int]
 
                 # Rare fallback: Use ex-earn IV if Greeks data missing for call leg
                 if front_call_iv is None or front_call_iv <= 0:
-                    logger.warning(f"{sym}: Greeks IV missing for call front leg, using ex-earn fallback")
+                    greeks_logger.warning(f"{sym}: Greeks IV missing for call front leg, using ex-earn fallback")
                     xearn_call_front = extract_xearn_iv(market_metrics, sym, front_choice["expiration"])
                     if xearn_call_front and xearn_call_front > 0:
                         front_call_iv = xearn_call_front
                         call_iv_source_front = "exearn_fallback"
                     else:
                         skip_stats[SKIP_MISSING_IV] += 1
-                        logger.debug(f"Skipping {sym} double {front}-{back}: missing call front IV")
+                        greeks_logger.debug(f"{sym} double {front}-{back}: Skipping - missing call front IV")
                         continue
 
                 if back_call_iv is None or back_call_iv <= 0:
-                    logger.warning(f"{sym}: Greeks IV missing for call back leg, using ex-earn fallback")
+                    greeks_logger.warning(f"{sym}: Greeks IV missing for call back leg, using ex-earn fallback")
                     xearn_call_back = extract_xearn_iv(market_metrics, sym, back_choice["expiration"])
                     if xearn_call_back and xearn_call_back > 0:
                         back_call_iv = xearn_call_back
                         call_iv_source_back = "exearn_fallback"
                     else:
                         skip_stats[SKIP_MISSING_IV] += 1
-                        logger.debug(f"Skipping {sym} double {front}-{back}: missing call back IV")
+                        greeks_logger.debug(f"{sym} double {front}-{back}: Skipping - missing call back IV")
                         continue
 
                 # Rare fallback: Use ex-earn IV if Greeks data missing for put leg
                 if front_put_iv is None or front_put_iv <= 0:
-                    logger.warning(f"{sym}: Greeks IV missing for put front leg, using ex-earn fallback")
+                    greeks_logger.warning(f"{sym}: Greeks IV missing for put front leg, using ex-earn fallback")
                     xearn_put_front = extract_xearn_iv(market_metrics, sym, front_choice["expiration"])
                     if xearn_put_front and xearn_put_front > 0:
                         front_put_iv = xearn_put_front
                         put_iv_source_front = "exearn_fallback"
                     else:
                         skip_stats[SKIP_MISSING_IV] += 1
-                        logger.debug(f"Skipping {sym} double {front}-{back}: missing put front IV")
+                        greeks_logger.debug(f"{sym} double {front}-{back}: Skipping - missing put front IV")
                         continue
 
                 if back_put_iv is None or back_put_iv <= 0:
-                    logger.warning(f"{sym}: Greeks IV missing for put back leg, using ex-earn fallback")
+                    greeks_logger.warning(f"{sym}: Greeks IV missing for put back leg, using ex-earn fallback")
                     xearn_put_back = extract_xearn_iv(market_metrics, sym, back_choice["expiration"])
                     if xearn_put_back and xearn_put_back > 0:
                         back_put_iv = xearn_put_back
                         put_iv_source_back = "exearn_fallback"
                     else:
                         skip_stats[SKIP_MISSING_IV] += 1
-                        logger.debug(f"Skipping {sym} double {front}-{back}: missing put back IV")
+                        greeks_logger.debug(f"{sym} double {front}-{back}: Skipping - missing put back IV")
                         continue
 
                 # Recalculate forward IV and FF with actual IVs used (Greeks or fallback)
@@ -1419,7 +1538,7 @@ async def scan(session: Session, tickers: List[str], pairs: List[Tuple[int, int]
 
                 if fwd_call is None or fwd_call <= 0 or fwd_put is None or fwd_put <= 0:
                     skip_stats[SKIP_NONPOSITIVE_FWD_VAR] += 1
-                    logger.debug(f"Skipping {sym} double {front}-{back}: negative forward IV after IV assignment")
+                    greeks_logger.debug(f"{sym} double {front}-{back}: Skipping - negative forward IV after IV assignment")
                     continue
 
                 ff_call = (front_call_iv - fwd_call) / fwd_call
@@ -1434,31 +1553,29 @@ async def scan(session: Session, tickers: List[str], pairs: List[Tuple[int, int]
                 # Filter on min_ff (both wings must independently meet threshold)
                 if min_ff_double >= min_ff or show_all_scans:
                     passed += 1
-                    row = {
-                        # Common (8)
+
+                    # Log PASS in verbose mode
+                    if verbose:
+                        greeks_logger.info(f"{sym}: PASS - Double calendar (min_ff={min_ff_double:.3f}, {front}-{back} DTE)")
+
+                    rows.append({
+                        # Metadata (4)
                         "timestamp": timestamp,
                         "symbol": sym,
                         "structure": "double",
                         "spot_price": f"{spot:.2f}",
+                        # Expirations (4)
                         "front_dte": front_choice["dte"],
                         "back_dte": back_choice["dte"],
                         "front_expiry": front_choice["expiration"].isoformat(),
                         "back_expiry": back_choice["expiration"].isoformat(),
-                        # ATM-specific (8) - empty for double structure
-                        "atm_strike": "",
-                        "atm_delta": "",
-                        "atm_ff": "",
-                        "atm_iv_front": "",
-                        "atm_iv_back": "",
-                        "atm_fwd_iv": "",
-                        "atm_iv_source_front": "",
-                        "atm_iv_source_back": "",
-                        # Double-specific (8) - populated for double structure
-                        "call_strike": f"{front_call.strike:.2f}",
+                        # Strikes/Deltas (4) - UNIFIED: both populated for double structure
+                        "strike": f"{front_call.strike:.2f}",  # RENAMED from call_strike
                         "put_strike": f"{front_put.strike:.2f}",
-                        "call_delta": round(front_call.actual_delta, 4),
+                        "delta": round(front_call.actual_delta, 4),  # RENAMED from call_delta
                         "put_delta": round(front_put.actual_delta, 4),
-                        "call_ff": round(ff_call, 6),
+                        # FF Metrics (4) - all populated for double structure
+                        "ff": round(ff_call, 6),  # RENAMED from call_ff
                         "put_ff": round(ff_put, 6),
                         "min_ff": round(min_ff_double, 6),
                         "combined_ff": round(combined_ff, 6),
@@ -1469,24 +1586,23 @@ async def scan(session: Session, tickers: List[str], pairs: List[Tuple[int, int]
                         "put_front_iv": round(front_put_iv, 6),
                         "put_back_iv": round(back_put_iv, 6),
                         "put_fwd_iv": round(fwd_put, 6),
-                        # IV sources - double (4)
+                        # IV sources (4)
                         "iv_source_call_front": call_iv_source_front,
                         "iv_source_call_back": call_iv_source_back,
                         "iv_source_put_front": put_iv_source_front,
                         "iv_source_put_back": put_iv_source_back,
-                        # Quality filters (5)
+                        # Quality filters (6)
                         "earnings_conflict": "no" if not earnings_date else "",
                         "earnings_date": earnings_date.isoformat() if earnings_date else "",
                         "option_volume_today": f"{option_volume:.0f}" if option_volume is not None else "",
                         "liq_rating": str(liq_rating) if liq_rating is not None else "",
                         "earnings_source": earnings_source,
-                        # Tracking (1)
                         "skip_reason": ""
-                    }
-                    rows.append(row)
-                    # Stream to CSV if writer provided (memory-efficient output)
-                    if csv_writer is not None:
-                        csv_writer.writerow(row)
+                    })
+                elif verbose:
+                    # Log below-threshold symbols in verbose mode
+                    skip_stats[SKIP_BELOW_FF_THRESHOLD] += 1
+                    greeks_logger.info(f"{sym}: FILTER - Below FF threshold (min_ff={min_ff_double:.3f} < {min_ff:.2f}, {front}-{back} DTE)")
 
         if scan_atm:
             # ========== ATM CALENDAR MODE (delta-based strike selection) ==========
@@ -1495,27 +1611,20 @@ async def scan(session: Session, tickers: List[str], pairs: List[Tuple[int, int]
 
             # First, fetch Greeks for a range of strikes for each expiration
             # This allows delta-based ATM strike selection (50Δ target)
-            # SKIP Greeks fetching if --iv-ex-earn flag is enabled
             for target in required_targets:
                 exp_date = nearest_expiration(chain, target, dte_tolerance)
                 if exp_date is None:
                     continue
                 exp_obj = exp_by_date[exp_date]
 
-                # Conditionally fetch Greeks based on use_exearn_iv flag
-                if use_exearn_iv:
-                    # Skip Greeks streaming when --iv-ex-earn flag is enabled (20-30% faster)
-                    logger.info(f"{sym}: Using ex-earn IV (--iv-ex-earn flag enabled)")
+                # Fetch Greeks for strikes around spot price (±25% range)
+                try:
+                    greeks_map = await snapshot_greeks_for_range(
+                        session, exp_obj, spot, range_pct=0.25, timeout_s=timeout_s
+                    )
+                except Exception as e:
+                    greeks_logger.warning(f"{sym} {exp_date}: Greeks streamer connection failed - {e}. Skipping expiration")
                     greeks_map = {}  # Empty map - pick_atm_strike will fall back to nearest-spot
-                else:
-                    # Fetch Greeks for strikes around spot price (±25% range)
-                    try:
-                        greeks_map = await snapshot_greeks_for_range(
-                            session, exp_obj, spot, range_pct=0.25, timeout_s=timeout_s
-                        )
-                    except Exception as e:
-                        logger.warning(f"Greeks streamer connection failed for {sym} {exp_date}: {e}. Skipping this expiration.")
-                        greeks_map = {}  # Empty map - pick_atm_strike will fall back to nearest-spot
 
                 # Select ATM strike using delta-based selection (50Δ target)
                 # Falls back to nearest-spot if no Greeks available or no strikes within tolerance
@@ -1532,7 +1641,10 @@ async def scan(session: Session, tickers: List[str], pairs: List[Tuple[int, int]
                 streamer_syms.extend([call_sym, put_sym])
 
             if not choices:
-                print(f"[WARN] No expirations matched tolerance for {sym}", file=sys.stderr)
+                if verbose:
+                    market_logger.info(f"{sym}: SKIP - No expirations matched tolerance (ATM)")
+                else:
+                    market_logger.warning(f"{sym}: No expirations matched tolerance, skipping")
                 continue
 
             # 4) Use Greeks IV as primary (strike-level), fallback to ex-earn IV if missing
@@ -1542,70 +1654,49 @@ async def scan(session: Session, tickers: List[str], pairs: List[Tuple[int, int]
             call_iv_source_by_target: Dict[int, str] = {}
             put_iv_source_by_target: Dict[int, str] = {}
 
-            # Conditionally fetch Greeks or use ex-earn IV based on use_exearn_iv flag
-            if use_exearn_iv:
-                # Use ex-earn IV as primary source (skip Greeks streaming)
-                greek_map = {}  # Empty map - will use ex-earn IV below
-            else:
-                # Primary: Snapshot Greeks (to get IV and delta) for all ATM contracts
-                try:
-                    greek_map = await snapshot_greeks(session, streamer_syms, timeout_s=timeout_s)
-                except Exception as e:
-                    logger.warning(f"Greeks streamer connection failed for {sym}: {e}. Falling back to X-earn IV.")
-                    greek_map = {}  # Empty map - will fall back to X-earn IV
+            # Primary: Snapshot Greeks (to get IV and delta) for all ATM contracts
+            try:
+                greek_map = await snapshot_greeks(session, streamer_syms, timeout_s=timeout_s)
+            except Exception as e:
+                greeks_logger.warning(f"{sym}: Greeks streamer connection failed - {e}. Falling back to X-earn IV")
+                greek_map = {}  # Empty map - will fall back to X-earn IV
 
-                for target, ch in choices.items():
-                    call_iv = None
-                    put_iv = None
-                    # Unpack (iv, delta) tuples from greek_map
-                    if ch.call_streamer_symbol in greek_map:
-                        iv, delta = greek_map[ch.call_streamer_symbol]
-                        call_iv = iv if iv is not None and iv > 0 else None
-                    if ch.put_streamer_symbol in greek_map:
-                        iv, delta = greek_map[ch.put_streamer_symbol]
-                        put_iv = iv if iv is not None and iv > 0 else None
-
-                    # Store Greeks IV if available
-                    if call_iv:
-                        call_iv_by_target[target] = call_iv
-                        call_iv_source_by_target[target] = "greeks"
-                    if put_iv:
-                        put_iv_by_target[target] = put_iv
-                        put_iv_source_by_target[target] = "greeks"
-
-            # Use ex-earn IV for targets where Greeks IV is missing (or when --iv-ex-earn is enabled)
             for target, ch in choices.items():
-                # Check if we need ex-earn IV for call IV
-                if target not in call_iv_by_target:
-                    if use_exearn_iv:
-                        # Primary ex-earn IV mode (--iv-ex-earn flag)
-                        xearn_iv = extract_xearn_iv(market_metrics, sym, ch.expiration)
-                        if xearn_iv is not None and xearn_iv > 0:
-                            call_iv_by_target[target] = xearn_iv
-                            call_iv_source_by_target[target] = "exearn_primary"
-                    else:
-                        # Fallback mode (Greeks failed)
-                            logger.warning(f"{sym} {target}DTE: Greeks IV missing for call, using ex-earn fallback")
-                            xearn_iv = extract_xearn_iv(market_metrics, sym, ch.expiration)
-                            if xearn_iv is not None and xearn_iv > 0:
-                                call_iv_by_target[target] = xearn_iv
-                                call_iv_source_by_target[target] = "exearn_fallback"
+                call_iv = None
+                put_iv = None
+                # Unpack (iv, delta) tuples from greek_map
+                if ch.call_streamer_symbol in greek_map:
+                    iv, delta = greek_map[ch.call_streamer_symbol]
+                    call_iv = iv if iv is not None and iv > 0 else None
+                if ch.put_streamer_symbol in greek_map:
+                    iv, delta = greek_map[ch.put_streamer_symbol]
+                    put_iv = iv if iv is not None and iv > 0 else None
 
-                # Check if we need ex-earn IV for put IV
+                # Store Greeks IV if available
+                if call_iv:
+                    call_iv_by_target[target] = call_iv
+                    call_iv_source_by_target[target] = "greeks"
+                if put_iv:
+                    put_iv_by_target[target] = put_iv
+                    put_iv_source_by_target[target] = "greeks"
+
+            # Rare fallback: Use ex-earn IV for targets where Greeks IV is missing
+            for target, ch in choices.items():
+                # Check if we need fallback for call IV
+                if target not in call_iv_by_target:
+                    greeks_logger.warning(f"{sym} {target}DTE: Greeks IV missing for call, using ex-earn fallback")
+                    xearn_iv = extract_xearn_iv(market_metrics, sym, ch.expiration)
+                    if xearn_iv is not None and xearn_iv > 0:
+                        call_iv_by_target[target] = xearn_iv
+                        call_iv_source_by_target[target] = "exearn_fallback"
+
+                # Check if we need fallback for put IV
                 if target not in put_iv_by_target:
-                    if use_exearn_iv:
-                        # Primary ex-earn IV mode (--iv-ex-earn flag)
-                        xearn_iv = extract_xearn_iv(market_metrics, sym, ch.expiration)
-                        if xearn_iv is not None and xearn_iv > 0:
-                            put_iv_by_target[target] = xearn_iv
-                            put_iv_source_by_target[target] = "exearn_primary"
-                    else:
-                        # Fallback mode (Greeks failed)
-                        logger.warning(f"{sym} {target}DTE: Greeks IV missing for put, using ex-earn fallback")
-                        xearn_iv = extract_xearn_iv(market_metrics, sym, ch.expiration)
-                        if xearn_iv is not None and xearn_iv > 0:
-                            put_iv_by_target[target] = xearn_iv
-                            put_iv_source_by_target[target] = "exearn_fallback"
+                    greeks_logger.warning(f"{sym} {target}DTE: Greeks IV missing for put, using ex-earn fallback")
+                    xearn_iv = extract_xearn_iv(market_metrics, sym, ch.expiration)
+                    if xearn_iv is not None and xearn_iv > 0:
+                        put_iv_by_target[target] = xearn_iv
+                        put_iv_source_by_target[target] = "exearn_fallback"
 
             # 6) Build rows for pairs
             for front, back in pairs:
@@ -1630,13 +1721,13 @@ async def scan(session: Session, tickers: List[str], pairs: List[Tuple[int, int]
                 call_skip_reason = validate_ff_inputs(call_iv_f, call_iv_b, front_choice.dte, back_choice.dte)
                 if call_skip_reason:
                     skip_stats[SKIP_NONPOSITIVE_FWD_VAR] += 1
-                    logger.debug(f"Skipping {sym} ATM {front}-{back} call: {call_skip_reason}")
+                    greeks_logger.debug(f"{sym} ATM {front}-{back} call: Skipping - {call_skip_reason}")
                     continue
 
                 put_skip_reason = validate_ff_inputs(put_iv_f, put_iv_b, front_choice.dte, back_choice.dte)
                 if put_skip_reason:
                     skip_stats[SKIP_NONPOSITIVE_FWD_VAR] += 1
-                    logger.debug(f"Skipping {sym} ATM {front}-{back} put: {put_skip_reason}")
+                    greeks_logger.debug(f"{sym} ATM {front}-{back} put: Skipping - {put_skip_reason}")
                     continue
 
                 # Calculate single ATM FF using average of call and put IV
@@ -1647,7 +1738,7 @@ async def scan(session: Session, tickers: List[str], pairs: List[Tuple[int, int]
                 atm_fwd_iv = forward_iv(atm_iv_front, atm_iv_back, front_choice.dte, back_choice.dte)
                 if atm_fwd_iv is None or atm_fwd_iv <= 0:
                     skip_stats[SKIP_NONPOSITIVE_FWD_VAR] += 1
-                    logger.debug(f"Skipping {sym} ATM {front}-{back}: negative forward IV")
+                    greeks_logger.debug(f"{sym} ATM {front}-{back}: Skipping - negative forward IV")
                     continue
 
                 atm_ff = (atm_iv_front - atm_fwd_iv) / atm_fwd_iv
@@ -1666,33 +1757,31 @@ async def scan(session: Session, tickers: List[str], pairs: List[Tuple[int, int]
                 # Include result if: (1) meets FF threshold, OR (2) show_all_scans is enabled
                 if atm_ff >= min_ff or show_all_scans:
                     passed += 1
-                    row = {
-                        # Common (8)
+
+                    # Log PASS in verbose mode
+                    if verbose:
+                        greeks_logger.info(f"{sym}: PASS - ATM calendar (ff={atm_ff:.3f}, {front}-{back} DTE)")
+
+                    rows.append({
+                        # Metadata (4)
                         "timestamp": timestamp,
                         "symbol": sym,
                         "structure": "atm-call",
                         "spot_price": f"{spot:.2f}",
+                        # Expirations (4)
                         "front_dte": front_choice.dte,
                         "back_dte": back_choice.dte,
                         "front_expiry": front_choice.expiration.isoformat(),
                         "back_expiry": back_choice.expiration.isoformat(),
-                        # ATM-specific (8) - populated for ATM structure
-                        "atm_strike": f"{front_choice.strike:.2f}",
-                        "atm_delta": round(front_choice.actual_delta, 4) if front_choice.actual_delta is not None else "",
-                        "atm_ff": round(atm_ff, 6),
-                        "atm_iv_front": round(atm_iv_front, 6),
-                        "atm_iv_back": round(atm_iv_back, 6),
-                        "atm_fwd_iv": round(atm_fwd_iv, 6),
-                        "atm_iv_source_front": atm_iv_src_front,
-                        "atm_iv_source_back": atm_iv_src_back,
-                        # Double-specific (8) - empty for ATM structure
-                        "call_strike": "",
+                        # Strikes/Deltas (4) - UNIFIED: populated for ATM, put_* empty
+                        "strike": f"{front_choice.strike:.2f}",
                         "put_strike": "",
-                        "call_delta": "",
+                        "delta": round(front_choice.actual_delta, 4) if front_choice.actual_delta is not None else "",
                         "put_delta": "",
-                        "call_ff": "",
+                        # FF Metrics (4) - ff and min_ff populated (same value), put_ff and combined_ff empty
+                        "ff": round(atm_ff, 6),
                         "put_ff": "",
-                        "min_ff": "",
+                        "min_ff": round(atm_ff, 6),  # Same as ff for ATM
                         "combined_ff": "",
                         # IV detail (6) - keep for transparency per CLAUDE.md
                         "call_front_iv": round(call_iv_f, 6),
@@ -1701,28 +1790,27 @@ async def scan(session: Session, tickers: List[str], pairs: List[Tuple[int, int]
                         "put_front_iv": round(put_iv_f, 6),
                         "put_back_iv": round(put_iv_b, 6),
                         "put_fwd_iv": "",
-                        # IV sources - double (4) - keep for reference
+                        # IV sources (4) - keep for reference
                         "iv_source_call_front": call_iv_src_front,
                         "iv_source_call_back": call_iv_src_back,
                         "iv_source_put_front": put_iv_src_front,
                         "iv_source_put_back": put_iv_src_back,
-                        # Quality filters (5)
+                        # Quality filters (6)
                         "earnings_conflict": "no" if not earnings_date else "",
                         "earnings_date": earnings_date.isoformat() if earnings_date else "",
                         "option_volume_today": f"{option_volume:.0f}" if option_volume is not None else "",
                         "liq_rating": str(liq_rating) if liq_rating is not None else "",
                         "earnings_source": earnings_source,
-                        # Tracking (1)
                         "skip_reason": ""
-                    }
-                    rows.append(row)
-                    # Stream to CSV if writer provided (memory-efficient output)
-                    if csv_writer is not None:
-                        csv_writer.writerow(row)
+                    })
+                elif verbose:
+                    # Log below-threshold symbols in verbose mode
+                    skip_stats[SKIP_BELOW_FF_THRESHOLD] += 1
+                    greeks_logger.info(f"{sym}: FILTER - Below FF threshold (ff={atm_ff:.3f} < {min_ff:.2f}, {front}-{back} DTE)")
 
     # Sort results:
     # - Double calendars: sort by min_ff descending (primary), combined_ff (secondary), symbol (tertiary)
-    # - ATM calendars: sort by atm_ff descending (primary), symbol (secondary)
+    # - ATM calendars: sort by ff descending (primary), symbol (secondary)
     # Separate the two structures for appropriate sorting
     doubles = [r for r in rows if r["structure"] == "double"]
     atm_rows = [r for r in rows if r["structure"] == "atm-call"]
@@ -1730,8 +1818,8 @@ async def scan(session: Session, tickers: List[str], pairs: List[Tuple[int, int]
     # Sort doubles by min_ff (highest first), then combined_ff, then symbol
     doubles.sort(key=lambda r: (-r["min_ff"], -r["combined_ff"], r["symbol"]))
 
-    # Sort ATM by atm_ff (highest first), then symbol
-    atm_rows.sort(key=lambda r: (-r["atm_ff"], r["symbol"]))
+    # Sort ATM by ff (highest first), then symbol - v3.0: uses unified 'ff' column
+    atm_rows.sort(key=lambda r: (-r["ff"], r["symbol"]))
 
     # Combine back: doubles first (higher priority), then ATM
     rows = doubles + atm_rows
@@ -1846,46 +1934,47 @@ Examples:
     ap.add_argument("--delta-tolerance", type=float, default=0.05,
                     help="Max delta deviation for double calendars (default: 0.05 = ±5Δ). Range: 0.01-0.10.")
 
-    # IV source selection
-    ap.add_argument("--iv-ex-earn", action="store_true",
-                    help="Use ex-earn IV as primary source (skip Greeks streaming for 20-30%% performance gain). "
-                         "Ex-earn IV is expiration-level (not strike-specific), acceptable for performance-sensitive workflows.")
-
     # Debug/logging options
     ap.add_argument("--debug", action="store_true",
                     help="Enable debug logging from tastytrade SDK and httpx library.")
+    ap.add_argument("--quiet", action="store_true",
+                    help="Quiet mode: suppress per-symbol output, show only summary and errors.")
+    ap.add_argument("--verbose", action="store_true",
+                    help="Verbose mode: show ALL symbols (pass, filter, skip, error).")
+    ap.add_argument("--log-file", type=str, metavar='PATH',
+                    help='Write all logs to file with timestamps (enables "tee" functionality).')
 
     args = ap.parse_args()
     tickers = read_list_arg(args.tickers)
     pairs = parse_pairs(read_list_arg(args.pairs))
 
-    # Configure logging based on --debug flag
+    # Handle flag conflicts (Issue #39)
+    if args.quiet and args.verbose:
+        print("ERROR: Cannot use --quiet and --verbose together. Choose one.", file=sys.stderr)
+        sys.exit(1)
+
+    # Determine logging mode (Issue #38 + #39)
     if args.debug:
-        # Debug mode: Show all DEBUG messages from all libraries
-        logging.basicConfig(
-            level=logging.DEBUG,
-            format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-        )
+        mode = "debug"
+    elif args.quiet:
+        mode = "quiet"
+    elif args.verbose:
+        mode = "verbose"
     else:
-        # Normal mode: Silence third-party library debug/info logging
-        logging.basicConfig(
-            level=logging.WARNING,
-            format='%(message)s'
-        )
-        # Explicitly silence noisy libraries
-        logging.getLogger('tastytrade').setLevel(logging.WARNING)
-        logging.getLogger('httpx').setLevel(logging.WARNING)
-        logging.getLogger('earnings_cache').setLevel(logging.WARNING)
+        mode = "normal"
+
+    # Setup hierarchical logging system (Issue #38, #40)
+    scanner_logger = setup_logging(mode, log_file=args.log_file)
 
     # Validate flag values
     if args.delta_tolerance < 0.01 or args.delta_tolerance > 0.10:
-        print("ERROR: --delta-tolerance must be between 0.01 and 0.10", file=sys.stderr)
+        scanner_logger.error("SCANNER: --delta-tolerance must be between 0.01 and 0.10")
         sys.exit(1)
 
     username = os.environ.get("TT_USERNAME", "").strip()
     password = os.environ.get("TT_PASSWORD", "").strip()
     if not username or not password:
-        print("ERROR: Set TT_USERNAME and TT_PASSWORD env vars.", file=sys.stderr)
+        scanner_logger.error("SCANNER: Set TT_USERNAME and TT_PASSWORD env vars")
         sys.exit(2)
 
     # Create session
@@ -1931,20 +2020,20 @@ Examples:
 
         # Log results
         elapsed = time.time() - start_time
-        print(f"Earnings pre-filter: {len(tickers)} → {len(passing_symbols)} passed ({len(filtered_symbols)} filtered)")
-        print(f"  Cache hits: {cache_hits} | Fresh fetches: {fresh_fetches}")
-        print(f"  Earnings check completed in {elapsed:.1f}s")
+        scanner_logger.info(f"SCANNER: Earnings pre-filter: {len(tickers)} → {len(passing_symbols)} passed ({len(filtered_symbols)} filtered)")
+        scanner_logger.info(f"SCANNER: Cache hits: {cache_hits} | Fresh fetches: {fresh_fetches}")
+        scanner_logger.info(f"SCANNER: Earnings check completed in {elapsed:.1f}s")
 
         if args.show_earnings_conflicts:
             for symbol, reason in filtered_symbols:
-                print(f"  {symbol}: {reason}")
+                scanner_logger.info(f"SCANNER: {symbol}: {reason}")
 
         # Only process passing symbols
         tickers = passing_symbols
 
         # Early exit if all symbols filtered
         if not tickers:
-            print("No symbols passed earnings filter. Use --allow-earnings to scan through earnings.", file=sys.stderr)
+            scanner_logger.error("SCANNER: No symbols passed earnings filter. Use --allow-earnings to scan through earnings")
             sys.exit(0)
     else:
         # If --allow-earnings is set, mark all symbols as having earnings filter bypassed
@@ -1956,65 +2045,51 @@ Examples:
     # Default: filter earnings (unless --allow-earnings flag is set)
     skip_earnings_flag = not args.allow_earnings
 
-    # v2.2 CSV schema (40 columns)
-    # Breaking changes from v2.1:
-    # - Added: atm_iv_source_front, atm_iv_source_back (ATM-specific IV source tracking)
-    # - Added: liq_rating (liquidity_rating 0-5 from Market Metrics)
-    # - Renamed: avg_options_volume_20d → option_volume_today (now using dxFeed Underlying.optionVolume)
-    # - Reordered: Logical grouping by structure (common, ATM, double, IV detail, sources, quality)
+    rows, skip_stats, scanned, passed = asyncio.run(scan(
+        session, tickers, pairs, args.min_ff, args.dte_tolerance, args.timeout,
+        skip_earnings=skip_earnings_flag,
+        options_volume_threshold=args.options_volume,
+        skip_liquidity_check=args.skip_liquidity_check,
+        show_earnings_conflicts=args.show_earnings_conflicts,
+        show_all_scans=args.show_all_scans,
+        structure=args.structure,
+        delta_tolerance=args.delta_tolerance,
+        earnings_data=earnings_data,
+        verbose=args.verbose
+    ))
+
+    # v3.0 CSV schema (32 columns) - BREAKING CHANGE
+    # Breaking changes from v2.2:
+    # - REMOVED: 8 atm_* columns (atm_strike, atm_delta, atm_ff, atm_iv_front, atm_iv_back, atm_fwd_iv, atm_iv_source_front, atm_iv_source_back)
+    # - RENAMED: call_strike → strike, call_delta → delta, call_ff → ff
+    # - ATM rows: populate strike, delta, ff, min_ff (leave put_* empty)
+    # - Double rows: populate both strike+put_strike, delta+put_delta, ff+put_ff, min_ff+combined_ff
+    # - Unified namespace eliminates 16 empty columns per row (20% reduction: 40 → 32)
     cols = [
-        # Common (8)
+        # Metadata (4)
         "timestamp", "symbol", "structure", "spot_price",
+        # Expirations (4)
         "front_dte", "back_dte", "front_expiry", "back_expiry",
-        # ATM-specific (8)
-        "atm_strike", "atm_delta", "atm_ff",
-        "atm_iv_front", "atm_iv_back", "atm_fwd_iv",
-        "atm_iv_source_front", "atm_iv_source_back",
-        # Double-specific (8)
-        "call_strike", "put_strike", "call_delta", "put_delta",
-        "call_ff", "put_ff", "min_ff", "combined_ff",
+        # Strikes/Deltas (4) - UNIFIED NAMESPACE
+        "strike", "put_strike", "delta", "put_delta",
+        # FF Metrics (4)
+        "ff", "put_ff", "min_ff", "combined_ff",
         # IV detail (6)
         "call_front_iv", "call_back_iv", "call_fwd_iv",
         "put_front_iv", "put_back_iv", "put_fwd_iv",
-        # IV sources - double (4)
+        # IV sources (4)
         "iv_source_call_front", "iv_source_call_back",
         "iv_source_put_front", "iv_source_put_back",
-        # Quality filters (5)
+        # Quality filters (6)
         "earnings_conflict", "earnings_date",
         "option_volume_today", "liq_rating", "earnings_source",
-        # Tracking (1)
         "skip_reason"
     ]
 
-    # Create streaming CSV writer if --csv-out specified (memory-efficient output)
-    # Opens file before scan starts, writes rows immediately as scan progresses
-    csv_writer = None
-    if args.csv_out:
-        csv_writer = StreamingCSVWriter(args.csv_out, cols)
-        csv_writer.__enter__()  # Open file and write header
-
-    try:
-        rows, skip_stats, scanned, passed = asyncio.run(scan(
-            session, tickers, pairs, args.min_ff, args.dte_tolerance, args.timeout,
-            skip_earnings=skip_earnings_flag,
-            options_volume_threshold=args.options_volume,
-            skip_liquidity_check=args.skip_liquidity_check,
-            show_earnings_conflicts=args.show_earnings_conflicts,
-            show_all_scans=args.show_all_scans,
-            structure=args.structure,
-            delta_tolerance=args.delta_tolerance,
-            use_exearn_iv=args.iv_ex_earn,
-            earnings_data=earnings_data,
-            csv_writer=csv_writer  # Pass writer for streaming output
-        ))
-    finally:
-        # Close CSV writer (even if scan interrupted/failed)
-        if csv_writer is not None:
-            csv_writer.__exit__(None, None, None)
-
     if not rows:
-        print("No results passing filters.")
+        scanner_logger.info("SCANNER: No results passing filters")
     else:
+        # Print CSV to stdout (for piping/redirection)
         print(",".join(cols))
         for r in rows:
             print(",".join(str(r.get(c, "")) for c in cols))
@@ -2023,27 +2098,27 @@ Examples:
     if args.json_out and rows:
         with open(args.json_out, "w", encoding="utf-8") as f:
             json.dump(rows, f, indent=2)
-        print(f"Wrote JSON -> {args.json_out}", file=sys.stderr)
+        scanner_logger.info(f"SCANNER: Wrote JSON -> {args.json_out}")
 
-    # CSV output was already written during scan (streaming mode)
-    # Just print confirmation message if CSV was requested
-    if args.csv_out:
-        if csv_writer and csv_writer.row_count > 0:
-            print(f"Wrote CSV -> {args.csv_out} ({csv_writer.row_count} rows)", file=sys.stderr)
-        elif not rows:
-            print(f"Note: {args.csv_out} created but empty (no results passing filters)", file=sys.stderr)
+    if args.csv_out and rows:
+        import csv
+        with open(args.csv_out, "w", newline="", encoding="utf-8") as f:
+            w = csv.DictWriter(f, fieldnames=cols)
+            w.writeheader()
+            w.writerows(rows)
+        scanner_logger.info(f"SCANNER: Wrote CSV -> {args.csv_out}")
 
     # Print scan summary statistics
     total_skipped = sum(skip_stats.values())
-    print(f"\n=== Scan Summary ===", file=sys.stderr)
-    print(f"Scanned: {scanned} symbols", file=sys.stderr)
-    print(f"Passed: {passed} opportunities", file=sys.stderr)
-    print(f"Skipped: {total_skipped} symbols", file=sys.stderr)
+    scanner_logger.info("SCANNER: === Scan Summary ===")
+    scanner_logger.info(f"SCANNER: Scanned: {scanned} symbols")
+    scanner_logger.info(f"SCANNER: Passed: {passed} opportunities")
+    scanner_logger.info(f"SCANNER: Skipped: {total_skipped} symbols")
     if total_skipped > 0:
-        print(f"\nSkip breakdown:", file=sys.stderr)
+        scanner_logger.info("SCANNER: Skip breakdown:")
         for reason, count in skip_stats.items():
             if count > 0:
-                print(f"  - {reason}: {count}", file=sys.stderr)
+                scanner_logger.info(f"SCANNER:   - {reason}: {count}")
 
 if __name__ == "__main__":
     main()

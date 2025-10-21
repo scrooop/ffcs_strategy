@@ -300,6 +300,9 @@ python scripts/ff_tastytrade_scanner.py \
 |------|------|---------|-------------|
 | `--csv-out` | string | *(none)* | Write results to CSV file. **Recommended for production.** |
 | `--json-out` | string | *(none)* | Write results to JSON file. |
+| `--quiet` | flag | `False` | Suppress per-symbol output, show only summary and errors. |
+| `--verbose` | flag | `False` | Show ALL symbols (pass, filter, skip, error). |
+| `--log-file` | string | *(none)* | Write all logs to file with timestamps. |
 | `--sandbox` | flag | `False` | Use sandbox environment (limited market data, not recommended). |
 
 ### Debug/Analysis Flags
@@ -547,6 +550,62 @@ For a 30-60 DTE calendar spread, the scanner will report **three different FF va
 5. **FF calculation**: `FF = (strike_IV_front - fwd_IV) / fwd_IV`
 
 **Key Takeaway:** When you see "front IV" and "back IV" in the documentation or CSV output, these refer to the IV **from the specific strikes being traded** (50Δ for ATM calendars, ±35Δ for double calendars), not a generic market-wide implied volatility index.
+
+---
+
+### Terminal Output Modes
+
+The scanner supports three terminal output modes to control verbosity:
+
+**Normal Mode (default):**
+
+Shows passing symbols and scan summary:
+
+```
+[SPY   ] PASS: FF=0.285 (30-60 DTE, strike=450.0, double)
+[TSLA  ] PASS: FF=0.235 (60-90 DTE, strike=880.0, atm-call)
+Scan complete: 150 scanned, 23 passed, 127 filtered (82s)
+```
+
+**Quiet Mode (--quiet):**
+
+Suppresses per-symbol output, shows only summary and errors:
+
+```
+Scan complete: 150 scanned, 23 passed, 127 filtered (82s)
+```
+
+**Verbose Mode (--verbose):**
+
+Shows ALL symbols including filtered and skipped:
+
+```
+[SPY   ] PASS: FF=0.285 (call=0.29, put=0.28), 30-60 DTE, strike=450.0/445.0
+[QQQ   ] FILTER: earnings_conflict (2025-11-15)
+[AAPL  ] FILTER: volume_too_low (3.2k < 10k)
+[TSLA  ] SKIP: no_expirations_matched
+... (ALL symbols shown)
+Scan complete: 150 scanned, 23 passed, 127 filtered (82s)
+```
+
+**Log File Mode (--log-file):**
+
+Write all output to a file with timestamps while showing normal terminal output:
+
+```bash
+# Log to timestamped file
+python scripts/ff_tastytrade_scanner.py \
+  --tickers SPY QQQ AAPL \
+  --pairs 30-60 \
+  --log-file "$(date +%y%m%d_%H%M)_scan.log"
+
+# Combine with quiet mode for silent operation
+python scripts/ff_tastytrade_scanner.py \
+  --tickers SPY QQQ AAPL \
+  --pairs 30-60 \
+  --quiet \
+  --log-file scan.log
+```
 
 ---
 

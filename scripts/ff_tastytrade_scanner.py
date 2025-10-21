@@ -1104,7 +1104,8 @@ async def scan(session: Session, tickers: List[str], pairs: List[Tuple[int, int]
                skip_earnings: bool = True, options_volume_threshold: Optional[float] = None,
                skip_liquidity_check: bool = False, show_earnings_conflicts: bool = False,
                show_all_scans: bool = False, structure: str = "both",
-               delta_tolerance: float = 0.05, earnings_data: Optional[Dict[str, dict]] = None,
+               delta_tolerance: float = 0.05, use_exearn_iv: bool = False,
+               earnings_data: Optional[Dict[str, dict]] = None,
                verbose: bool = False) -> Tuple[List[dict], Dict[str, int], int, int]:
     """
     Main scanner function: Find calendar spread opportunities with high forward factors.
@@ -1137,6 +1138,8 @@ async def scan(session: Session, tickers: List[str], pairs: List[Tuple[int, int]
         show_all_scans: Show all results regardless of FF threshold (default False)
         structure: Calendar type: "atm-call", "double", or "both" (default "both")
         delta_tolerance: Max delta deviation for double calendars (default 0.05 = ±5Δ)
+        use_exearn_iv: Use ex-earn IV as primary source (skip Greeks streaming). If ex-earn IV
+                      is missing, falls back to Greeks IV. (default False)
         earnings_data: Optional earnings data dict from EarningsCache (default None)
         verbose: If True, log ALL symbols (pass, filter, skip, error) for verbose mode (default False)
 
@@ -1473,64 +1476,115 @@ async def scan(session: Session, tickers: List[str], pairs: List[Tuple[int, int]
                 # Calculate combined FF (average of both legs - kept for reference)
                 combined_ff = (ff_call + ff_put) / 2.0
 
-                # Use Greeks IV as primary (strike-level precision, preserves skew)
-                # Fallback to ex-earn IV only if Greeks data is missing/invalid
-                call_iv_source_front = "greeks"
-                call_iv_source_back = "greeks"
-                put_iv_source_front = "greeks"
-                put_iv_source_back = "greeks"
+                # IV source logic: Conditional based on use_exearn_iv flag
+                # When use_exearn_iv=True: Use ex-earn IV as primary, fallback to Greeks IV
+                # When use_exearn_iv=False (default): Use Greeks IV as primary, fallback to ex-earn IV
+                if use_exearn_iv:
+                    # --iv-ex-earn flag enabled: Use ex-earn IV as primary
+                    call_iv_source_front = "exearn_primary"
+                    call_iv_source_back = "exearn_primary"
+                    put_iv_source_front = "exearn_primary"
+                    put_iv_source_back = "exearn_primary"
 
-                # Primary: Use Greeks IV from strike-level snapshot
-                front_call_iv = front_call.iv
-                back_call_iv = back_call.iv
-                front_put_iv = front_put.iv
-                back_put_iv = back_put.iv
+                    # Primary: Use ex-earn IV
+                    front_call_iv = extract_xearn_iv(market_metrics, sym, front_choice["expiration"])
+                    back_call_iv = extract_xearn_iv(market_metrics, sym, back_choice["expiration"])
+                    front_put_iv = extract_xearn_iv(market_metrics, sym, front_choice["expiration"])
+                    back_put_iv = extract_xearn_iv(market_metrics, sym, back_choice["expiration"])
 
-                # Rare fallback: Use ex-earn IV if Greeks data missing for call leg
-                if front_call_iv is None or front_call_iv <= 0:
-                    greeks_logger.warning(f"{sym}: Greeks IV missing for call front leg, using ex-earn fallback")
-                    xearn_call_front = extract_xearn_iv(market_metrics, sym, front_choice["expiration"])
-                    if xearn_call_front and xearn_call_front > 0:
-                        front_call_iv = xearn_call_front
-                        call_iv_source_front = "exearn_fallback"
-                    else:
+                    # Fallback to Greeks IV if ex-earn IV missing
+                    if front_call_iv is None or front_call_iv <= 0:
+                        greeks_logger.info(f"{sym}: Ex-earn IV missing for call front leg, using Greeks IV fallback")
+                        front_call_iv = front_call.iv
+                        call_iv_source_front = "greeks_fallback"
+                    if back_call_iv is None or back_call_iv <= 0:
+                        greeks_logger.info(f"{sym}: Ex-earn IV missing for call back leg, using Greeks IV fallback")
+                        back_call_iv = back_call.iv
+                        call_iv_source_back = "greeks_fallback"
+                    if front_put_iv is None or front_put_iv <= 0:
+                        greeks_logger.info(f"{sym}: Ex-earn IV missing for put front leg, using Greeks IV fallback")
+                        front_put_iv = front_put.iv
+                        put_iv_source_front = "greeks_fallback"
+                    if back_put_iv is None or back_put_iv <= 0:
+                        greeks_logger.info(f"{sym}: Ex-earn IV missing for put back leg, using Greeks IV fallback")
+                        back_put_iv = back_put.iv
+                        put_iv_source_back = "greeks_fallback"
+
+                    # Final validation: Skip if still missing after fallback
+                    if front_call_iv is None or front_call_iv <= 0:
                         skip_stats[SKIP_MISSING_IV] += 1
                         greeks_logger.debug(f"{sym} double {front}-{back}: Skipping - missing call front IV")
                         continue
-
-                if back_call_iv is None or back_call_iv <= 0:
-                    greeks_logger.warning(f"{sym}: Greeks IV missing for call back leg, using ex-earn fallback")
-                    xearn_call_back = extract_xearn_iv(market_metrics, sym, back_choice["expiration"])
-                    if xearn_call_back and xearn_call_back > 0:
-                        back_call_iv = xearn_call_back
-                        call_iv_source_back = "exearn_fallback"
-                    else:
+                    if back_call_iv is None or back_call_iv <= 0:
                         skip_stats[SKIP_MISSING_IV] += 1
                         greeks_logger.debug(f"{sym} double {front}-{back}: Skipping - missing call back IV")
                         continue
-
-                # Rare fallback: Use ex-earn IV if Greeks data missing for put leg
-                if front_put_iv is None or front_put_iv <= 0:
-                    greeks_logger.warning(f"{sym}: Greeks IV missing for put front leg, using ex-earn fallback")
-                    xearn_put_front = extract_xearn_iv(market_metrics, sym, front_choice["expiration"])
-                    if xearn_put_front and xearn_put_front > 0:
-                        front_put_iv = xearn_put_front
-                        put_iv_source_front = "exearn_fallback"
-                    else:
+                    if front_put_iv is None or front_put_iv <= 0:
                         skip_stats[SKIP_MISSING_IV] += 1
                         greeks_logger.debug(f"{sym} double {front}-{back}: Skipping - missing put front IV")
                         continue
-
-                if back_put_iv is None or back_put_iv <= 0:
-                    greeks_logger.warning(f"{sym}: Greeks IV missing for put back leg, using ex-earn fallback")
-                    xearn_put_back = extract_xearn_iv(market_metrics, sym, back_choice["expiration"])
-                    if xearn_put_back and xearn_put_back > 0:
-                        back_put_iv = xearn_put_back
-                        put_iv_source_back = "exearn_fallback"
-                    else:
+                    if back_put_iv is None or back_put_iv <= 0:
                         skip_stats[SKIP_MISSING_IV] += 1
                         greeks_logger.debug(f"{sym} double {front}-{back}: Skipping - missing put back IV")
                         continue
+                else:
+                    # Default mode: Use Greeks IV as primary, fallback to ex-earn IV
+                    call_iv_source_front = "greeks"
+                    call_iv_source_back = "greeks"
+                    put_iv_source_front = "greeks"
+                    put_iv_source_back = "greeks"
+
+                    # Primary: Use Greeks IV from strike-level snapshot
+                    front_call_iv = front_call.iv
+                    back_call_iv = back_call.iv
+                    front_put_iv = front_put.iv
+                    back_put_iv = back_put.iv
+
+                    # Rare fallback: Use ex-earn IV if Greeks data missing for call leg
+                    if front_call_iv is None or front_call_iv <= 0:
+                        greeks_logger.warning(f"{sym}: Greeks IV missing for call front leg, using ex-earn fallback")
+                        xearn_call_front = extract_xearn_iv(market_metrics, sym, front_choice["expiration"])
+                        if xearn_call_front and xearn_call_front > 0:
+                            front_call_iv = xearn_call_front
+                            call_iv_source_front = "exearn_fallback"
+                        else:
+                            skip_stats[SKIP_MISSING_IV] += 1
+                            greeks_logger.debug(f"{sym} double {front}-{back}: Skipping - missing call front IV")
+                            continue
+
+                    if back_call_iv is None or back_call_iv <= 0:
+                        greeks_logger.warning(f"{sym}: Greeks IV missing for call back leg, using ex-earn fallback")
+                        xearn_call_back = extract_xearn_iv(market_metrics, sym, back_choice["expiration"])
+                        if xearn_call_back and xearn_call_back > 0:
+                            back_call_iv = xearn_call_back
+                            call_iv_source_back = "exearn_fallback"
+                        else:
+                            skip_stats[SKIP_MISSING_IV] += 1
+                            greeks_logger.debug(f"{sym} double {front}-{back}: Skipping - missing call back IV")
+                            continue
+
+                    # Rare fallback: Use ex-earn IV if Greeks data missing for put leg
+                    if front_put_iv is None or front_put_iv <= 0:
+                        greeks_logger.warning(f"{sym}: Greeks IV missing for put front leg, using ex-earn fallback")
+                        xearn_put_front = extract_xearn_iv(market_metrics, sym, front_choice["expiration"])
+                        if xearn_put_front and xearn_put_front > 0:
+                            front_put_iv = xearn_put_front
+                            put_iv_source_front = "exearn_fallback"
+                        else:
+                            skip_stats[SKIP_MISSING_IV] += 1
+                            greeks_logger.debug(f"{sym} double {front}-{back}: Skipping - missing put front IV")
+                            continue
+
+                    if back_put_iv is None or back_put_iv <= 0:
+                        greeks_logger.warning(f"{sym}: Greeks IV missing for put back leg, using ex-earn fallback")
+                        xearn_put_back = extract_xearn_iv(market_metrics, sym, back_choice["expiration"])
+                        if xearn_put_back and xearn_put_back > 0:
+                            back_put_iv = xearn_put_back
+                            put_iv_source_back = "exearn_fallback"
+                        else:
+                            skip_stats[SKIP_MISSING_IV] += 1
+                            greeks_logger.debug(f"{sym} double {front}-{back}: Skipping - missing put back IV")
+                            continue
 
                 # Recalculate forward IV and FF with actual IVs used (Greeks or fallback)
                 fwd_call = forward_iv(front_call_iv, back_call_iv, front_choice["dte"], back_choice["dte"])
@@ -1647,56 +1701,101 @@ async def scan(session: Session, tickers: List[str], pairs: List[Tuple[int, int]
                     market_logger.warning(f"{sym}: No expirations matched tolerance, skipping")
                 continue
 
-            # 4) Use Greeks IV as primary (strike-level), fallback to ex-earn IV if missing
-            # Store call and put IVs separately for transparency
+            # 4) IV source logic: Conditional based on use_exearn_iv flag
+            # When use_exearn_iv=True: Use ex-earn IV as primary, fallback to Greeks IV
+            # When use_exearn_iv=False (default): Use Greeks IV as primary, fallback to ex-earn IV
             call_iv_by_target: Dict[int, float] = {}
             put_iv_by_target: Dict[int, float] = {}
             call_iv_source_by_target: Dict[int, str] = {}
             put_iv_source_by_target: Dict[int, str] = {}
 
-            # Primary: Snapshot Greeks (to get IV and delta) for all ATM contracts
-            try:
-                greek_map = await snapshot_greeks(session, streamer_syms, timeout_s=timeout_s)
-            except Exception as e:
-                greeks_logger.warning(f"{sym}: Greeks streamer connection failed - {e}. Falling back to X-earn IV")
-                greek_map = {}  # Empty map - will fall back to X-earn IV
+            if use_exearn_iv:
+                # --iv-ex-earn flag enabled: Use ex-earn IV as primary
+                greeks_logger.info(f"{sym}: Using ex-earn IV as primary source (--iv-ex-earn flag enabled)")
 
-            for target, ch in choices.items():
-                call_iv = None
-                put_iv = None
-                # Unpack (iv, delta) tuples from greek_map
-                if ch.call_streamer_symbol in greek_map:
-                    iv, delta = greek_map[ch.call_streamer_symbol]
-                    call_iv = iv if iv is not None and iv > 0 else None
-                if ch.put_streamer_symbol in greek_map:
-                    iv, delta = greek_map[ch.put_streamer_symbol]
-                    put_iv = iv if iv is not None and iv > 0 else None
-
-                # Store Greeks IV if available
-                if call_iv:
-                    call_iv_by_target[target] = call_iv
-                    call_iv_source_by_target[target] = "greeks"
-                if put_iv:
-                    put_iv_by_target[target] = put_iv
-                    put_iv_source_by_target[target] = "greeks"
-
-            # Rare fallback: Use ex-earn IV for targets where Greeks IV is missing
-            for target, ch in choices.items():
-                # Check if we need fallback for call IV
-                if target not in call_iv_by_target:
-                    greeks_logger.warning(f"{sym} {target}DTE: Greeks IV missing for call, using ex-earn fallback")
+                # Primary: Try ex-earn IV first
+                for target, ch in choices.items():
                     xearn_iv = extract_xearn_iv(market_metrics, sym, ch.expiration)
                     if xearn_iv is not None and xearn_iv > 0:
                         call_iv_by_target[target] = xearn_iv
-                        call_iv_source_by_target[target] = "exearn_fallback"
-
-                # Check if we need fallback for put IV
-                if target not in put_iv_by_target:
-                    greeks_logger.warning(f"{sym} {target}DTE: Greeks IV missing for put, using ex-earn fallback")
-                    xearn_iv = extract_xearn_iv(market_metrics, sym, ch.expiration)
-                    if xearn_iv is not None and xearn_iv > 0:
                         put_iv_by_target[target] = xearn_iv
-                        put_iv_source_by_target[target] = "exearn_fallback"
+                        call_iv_source_by_target[target] = "exearn_primary"
+                        put_iv_source_by_target[target] = "exearn_primary"
+
+                # Fallback: Fetch Greeks IV for targets missing ex-earn IV
+                targets_needing_greeks = [t for t in choices.keys() if t not in call_iv_by_target]
+                if targets_needing_greeks:
+                    greeks_logger.info(f"{sym}: Ex-earn IV missing for some targets, fetching Greeks IV as fallback")
+                    try:
+                        greek_map = await snapshot_greeks(session, streamer_syms, timeout_s=timeout_s)
+                    except Exception as e:
+                        greeks_logger.warning(f"{sym}: Greeks streamer connection failed - {e}")
+                        greek_map = {}
+
+                    for target, ch in choices.items():
+                        if target not in call_iv_by_target:  # Missing ex-earn IV
+                            call_iv = None
+                            put_iv = None
+                            # Unpack (iv, delta) tuples from greek_map
+                            if ch.call_streamer_symbol in greek_map:
+                                iv, delta = greek_map[ch.call_streamer_symbol]
+                                call_iv = iv if iv is not None and iv > 0 else None
+                            if ch.put_streamer_symbol in greek_map:
+                                iv, delta = greek_map[ch.put_streamer_symbol]
+                                put_iv = iv if iv is not None and iv > 0 else None
+
+                            # Store Greeks IV as fallback
+                            if call_iv:
+                                call_iv_by_target[target] = call_iv
+                                call_iv_source_by_target[target] = "greeks_fallback"
+                            if put_iv:
+                                put_iv_by_target[target] = put_iv
+                                put_iv_source_by_target[target] = "greeks_fallback"
+            else:
+                # Default mode: Use Greeks IV as primary, fallback to ex-earn IV
+                # Primary: Snapshot Greeks (to get IV and delta) for all ATM contracts
+                try:
+                    greek_map = await snapshot_greeks(session, streamer_syms, timeout_s=timeout_s)
+                except Exception as e:
+                    greeks_logger.warning(f"{sym}: Greeks streamer connection failed - {e}. Falling back to X-earn IV")
+                    greek_map = {}  # Empty map - will fall back to X-earn IV
+
+                for target, ch in choices.items():
+                    call_iv = None
+                    put_iv = None
+                    # Unpack (iv, delta) tuples from greek_map
+                    if ch.call_streamer_symbol in greek_map:
+                        iv, delta = greek_map[ch.call_streamer_symbol]
+                        call_iv = iv if iv is not None and iv > 0 else None
+                    if ch.put_streamer_symbol in greek_map:
+                        iv, delta = greek_map[ch.put_streamer_symbol]
+                        put_iv = iv if iv is not None and iv > 0 else None
+
+                    # Store Greeks IV if available
+                    if call_iv:
+                        call_iv_by_target[target] = call_iv
+                        call_iv_source_by_target[target] = "greeks"
+                    if put_iv:
+                        put_iv_by_target[target] = put_iv
+                        put_iv_source_by_target[target] = "greeks"
+
+                # Rare fallback: Use ex-earn IV for targets where Greeks IV is missing
+                for target, ch in choices.items():
+                    # Check if we need fallback for call IV
+                    if target not in call_iv_by_target:
+                        greeks_logger.warning(f"{sym} {target}DTE: Greeks IV missing for call, using ex-earn fallback")
+                        xearn_iv = extract_xearn_iv(market_metrics, sym, ch.expiration)
+                        if xearn_iv is not None and xearn_iv > 0:
+                            call_iv_by_target[target] = xearn_iv
+                            call_iv_source_by_target[target] = "exearn_fallback"
+
+                    # Check if we need fallback for put IV
+                    if target not in put_iv_by_target:
+                        greeks_logger.warning(f"{sym} {target}DTE: Greeks IV missing for put, using ex-earn fallback")
+                        xearn_iv = extract_xearn_iv(market_metrics, sym, ch.expiration)
+                        if xearn_iv is not None and xearn_iv > 0:
+                            put_iv_by_target[target] = xearn_iv
+                            put_iv_source_by_target[target] = "exearn_fallback"
 
             # 6) Build rows for pairs
             for front, back in pairs:
@@ -1853,6 +1952,39 @@ def read_list_arg(values: List[str]) -> List[str]:
         out.extend([x for x in v.split(",") if x])
     return [x.strip().upper() for x in out if x.strip()]
 
+def read_symbols_from_file(file_path: str) -> List[str]:
+    """
+    Read ticker symbols from a text file (one symbol per line).
+
+    Args:
+        file_path: Path to text file containing symbols
+
+    Returns:
+        List of uppercase, stripped symbols
+
+    Raises:
+        FileNotFoundError: If file does not exist
+        ValueError: If file is empty or contains no valid symbols
+
+    Example:
+        >>> read_symbols_from_file('symbols.txt')
+        ['SPY', 'QQQ', 'AAPL']
+    """
+    if not os.path.exists(file_path):
+        raise FileNotFoundError(f"Symbol file not found: {file_path}")
+
+    symbols = []
+    with open(file_path, 'r') as f:
+        for line in f:
+            symbol = line.strip().upper()
+            if symbol and not symbol.startswith('#'):  # Skip empty lines and comments
+                symbols.append(symbol)
+
+    if not symbols:
+        raise ValueError(f"No valid symbols found in file: {file_path}")
+
+    return symbols
+
 def main():
     # Workaround for Python 3.14 asyncio task cancellation recursion bug
     # When DXLinkStreamer connections timeout, pending _connect() tasks accumulate
@@ -1867,6 +1999,9 @@ def main():
 Examples:
   # Daily pre-market scan with quality filtering
   python ff_tastytrade_scanner.py --tickers SPY QQQ AAPL --pairs 30-60 --min-ff 0.23 --csv-out scan.csv
+
+  # Scan symbols from a file (one symbol per line)
+  python ff_tastytrade_scanner.py sp500_symbols.txt --pairs 30-60 --min-ff 0.23 --csv-out scan.csv
 
   # Scan for double calendars only
   python ff_tastytrade_scanner.py --tickers SPY QQQ --pairs 60-90 --structure double --min-ff 0.20
@@ -1889,9 +2024,15 @@ Examples:
         formatter_class=argparse.RawDescriptionHelpFormatter
     )
 
+    # Positional argument for optional file input
+    ap.add_argument("input_file", nargs="?", default=None,
+                    help="Optional: Path to text file containing symbols (one per line). "
+                         "If provided, --tickers is not required.")
+
     # Core scanner parameters
-    ap.add_argument("--tickers", nargs="+", required=True,
-                    help="List of underlyings (space or comma-separated). Example: SPY QQQ AAPL")
+    ap.add_argument("--tickers", nargs="+", default=None,
+                    help="List of underlyings (space or comma-separated). Example: SPY QQQ AAPL. "
+                         "Not required if input_file is provided.")
     ap.add_argument("--pairs", nargs="+", required=True,
                     help="DTE pairs (front-back). Example: 30-60 30-90 60-90")
     ap.add_argument("--min-ff", type=float, default=0.20,
@@ -1934,6 +2075,12 @@ Examples:
     ap.add_argument("--delta-tolerance", type=float, default=0.05,
                     help="Max delta deviation for double calendars (default: 0.05 = ±5Δ). Range: 0.01-0.10.")
 
+    # IV source selection
+    ap.add_argument("--iv-ex-earn", action="store_true",
+                    help="Use ex-earn IV as primary source instead of Greeks IV. "
+                         "Falls back to Greeks IV if ex-earn IV is missing. "
+                         "Note: Ex-earn IV is expiration-level (not strike-specific).")
+
     # Debug/logging options
     ap.add_argument("--debug", action="store_true",
                     help="Enable debug logging from tastytrade SDK and httpx library.")
@@ -1945,7 +2092,26 @@ Examples:
                     help='Write all logs to file with timestamps (enables "tee" functionality).')
 
     args = ap.parse_args()
-    tickers = read_list_arg(args.tickers)
+
+    # Validate ticker input sources
+    if args.input_file and args.tickers:
+        print("ERROR: Cannot use both input_file and --tickers. Choose one.", file=sys.stderr)
+        sys.exit(1)
+
+    if not args.input_file and not args.tickers:
+        print("ERROR: Must provide either input_file or --tickers.", file=sys.stderr)
+        sys.exit(1)
+
+    # Read tickers from file or command-line args
+    try:
+        if args.input_file:
+            tickers = read_symbols_from_file(args.input_file)
+        else:
+            tickers = read_list_arg(args.tickers)
+    except (FileNotFoundError, ValueError) as e:
+        print(f"ERROR: {e}", file=sys.stderr)
+        sys.exit(1)
+
     pairs = parse_pairs(read_list_arg(args.pairs))
 
     # Handle flag conflicts (Issue #39)
@@ -2054,6 +2220,7 @@ Examples:
         show_all_scans=args.show_all_scans,
         structure=args.structure,
         delta_tolerance=args.delta_tolerance,
+        use_exearn_iv=args.iv_ex_earn,
         earnings_data=earnings_data,
         verbose=args.verbose
     ))

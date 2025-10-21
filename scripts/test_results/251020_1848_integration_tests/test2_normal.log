@@ -1,0 +1,12 @@
+[SCANNER] INFO : Earnings pre-filter: 3 → 2 passed (1 filtered)
+[SCANNER] INFO : Cache hits: 3 | Fresh fetches: 0
+[SCANNER] INFO : Earnings check completed in 0.0s
+[SPY   ] WARN : Earnings date unavailable, skipping earnings check
+[ASML  ] INFO : FILTER - Liquidity rating 2 < 3
+[SCANNER] INFO : No results passing filters
+[SCANNER] INFO : === Scan Summary ===
+[SCANNER] INFO : Scanned: 2 symbols
+[SCANNER] INFO : Passed: 0 opportunities
+[SCANNER] INFO : Skipped: 1 symbols
+[SCANNER] INFO : Skip breakdown:
+[SCANNER] INFO : - volume_too_low: 1

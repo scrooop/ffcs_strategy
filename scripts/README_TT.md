@@ -154,12 +154,19 @@ python scripts/ff_tastytrade_scanner.py --help
 # Activate venv first (if not already active)
 source venv/bin/activate
 
-# Run daily scan
+# Run daily scan (option 1: command-line tickers)
 python scripts/ff_tastytrade_scanner.py \
   --tickers SPY QQQ AAPL TSLA NVDA META AMZN GOOGL MSFT AMD \
   --pairs 30-60 30-90 60-90 \
   --min-ff 0.23 \
-  
+  --structure both \
+  --csv-out "$(date +%y%m%d_%H%M)_ff_scan.csv"
+
+# OR (option 2: symbols from file)
+python scripts/ff_tastytrade_scanner.py \
+  data/watchlist.txt \
+  --pairs 30-60 30-90 60-90 \
+  --min-ff 0.23 \
   --structure both \
   --csv-out "$(date +%y%m%d_%H%M)_ff_scan.csv"
 ```
@@ -182,7 +189,29 @@ python scripts/ff_tastytrade_scanner.py \
   --structure atm-call
 ```
 
-### Example 2: Double Calendar Scan (60-90 DTE)
+### Example 2: Scan Symbols from File
+
+Scan multiple symbols from a text file (one symbol per line):
+
+```bash
+python scripts/ff_tastytrade_scanner.py \
+  data/sp500_symbols.txt \
+  --pairs 30-60 \
+  --min-ff 0.23 \
+  --csv-out scan.csv
+```
+
+**File format (`sp500_symbols.txt`):**
+```
+SPY
+QQQ
+AAPL
+TSLA
+# This is a comment
+NVDA
+```
+
+### Example 3: Double Calendar Scan (60-90 DTE)
 
 Focus on ±35Δ double calendars for longer-dated expirations:
 
@@ -195,7 +224,7 @@ python scripts/ff_tastytrade_scanner.py \
   --csv-out double_calendars.csv
 ```
 
-### Example 3: Scan Both ATM and Double Calendars
+### Example 4: Scan Both ATM and Double Calendars
 
 Get all tradable structures (most comprehensive):
 
@@ -208,7 +237,7 @@ python scripts/ff_tastytrade_scanner.py \
   --csv-out scan.csv
 ```
 
-### Example 4: Allow Trading Through Earnings
+### Example 5: Allow Trading Through Earnings
 
 Disable earnings filtering (for earnings-aware strategies):
 
@@ -219,7 +248,7 @@ python scripts/ff_tastytrade_scanner.py \
   --allow-earnings
 ```
 
-### Example 5: Debug Why Symbol Was Filtered
+### Example 6: Debug Why Symbol Was Filtered
 
 See which positions were excluded due to earnings conflicts:
 
@@ -239,7 +268,8 @@ python scripts/ff_tastytrade_scanner.py \
 
 | Flag | Type | Default | Description |
 |------|------|---------|-------------|
-| `--tickers` | list | **required** | List of ticker symbols (space or comma-separated). Example: `SPY QQQ AAPL` |
+| `input_file` | positional | *(optional)* | Path to text file containing symbols (one per line). If provided, `--tickers` is not required. Example: `symbols.txt` |
+| `--tickers` | list | *(required)* | List of ticker symbols (space or comma-separated). Not required if `input_file` is provided. Example: `SPY QQQ AAPL` |
 | `--pairs` | list | **required** | DTE pairs as `front-back`. Example: `30-60 30-90 60-90` |
 | `--min-ff` | float | `0.20` | Minimum Forward Factor threshold. Use `0.23` for ~20 trades/month. |
 | `--dte-tolerance` | int | `5` | Max deviation from target DTE in days. |
@@ -251,6 +281,7 @@ python scripts/ff_tastytrade_scanner.py \
 |------|------|---------|-------------|
 | `--structure` | choice | `both` | Calendar structure to scan: `atm-call`, `double`, or `both`. |
 | `--delta-tolerance` | float | `0.05` | Max delta deviation for ±35Δ strikes (range: 0.01-0.10). |
+| `--iv-ex-earn` | flag | `False` | Use ex-earn IV as primary source instead of Greeks IV. Falls back to Greeks IV if ex-earn IV is missing. |
 
 **Structure Options:**
 - `atm-call`: ATM call calendars only (simplest, cheapest)
@@ -286,13 +317,29 @@ python scripts/ff_tastytrade_scanner.py \
 - `50000`: High volume (≈50k+ contracts/day) - Use for large positions
 - `5`: Extremely liquid (≈100k+ contracts/day)
 
-### IV Source (v2.2)
+### IV Source Selection
 
-**Greeks IV is Primary Source:**
-- Scanner always fetches Greeks IV from dxFeed (strike-level precision)
+**Default Behavior (Greeks IV Primary):**
+- Scanner fetches Greeks IV from dxFeed (strike-level precision)
 - X-earn IV is rare fallback when Greeks IV unavailable (expiration-level only)
-- See CSV `atm_iv_source_*` or `iv_source_*` columns for source tracking
-- No CLI flags needed - graceful degradation is automatic
+- CSV columns show `iv_source_*` = `greeks` or `exearn_fallback`
+
+**Alternative Mode (`--iv-ex-earn` flag):**
+- Use ex-earn IV as primary source (expiration-level)
+- Falls back to Greeks IV when ex-earn IV is missing
+- CSV columns show `iv_source_*` = `exearn_primary` or `greeks_fallback`
+- **Note:** Ex-earn IV is expiration-level (not strike-specific), while Greeks IV preserves volatility skew
+
+**When to Use `--iv-ex-earn`:**
+- Performance-sensitive workflows (skips Greeks streaming when ex-earn IV available)
+- Backtesting with historical ex-earn IV data
+- When strike-level IV precision is not required
+
+**Example:**
+```bash
+# Use ex-earn IV as primary source
+python scripts/ff_tastytrade_scanner.py --tickers SPY QQQ --pairs 30-60 --iv-ex-earn
+```
 
 ### Output Options
 
@@ -647,10 +694,10 @@ The scanner outputs a unified CSV schema that supports both ATM and double calen
 | `put_front_iv` | float | Put IV at front expiration | ✅ | ✅ |
 | `put_back_iv` | float | Put IV at back expiration | ✅ | ✅ |
 | `put_fwd_iv` | float | Forward IV for put leg (computed) | ✅ | ✅ |
-| `iv_source_call_front` | enum | Call IV source for front: `greeks` or `exearn_fallback` | *(empty)* | ✅ |
-| `iv_source_call_back` | enum | Call IV source for back: `greeks` or `exearn_fallback` | *(empty)* | ✅ |
-| `iv_source_put_front` | enum | Put IV source for front: `greeks` or `exearn_fallback` | *(empty)* | ✅ |
-| `iv_source_put_back` | enum | Put IV source for back: `greeks` or `exearn_fallback` | *(empty)* | ✅ |
+| `iv_source_call_front` | enum | Call IV source for front: `greeks`, `exearn_fallback`, `exearn_primary`, or `greeks_fallback` | *(empty)* | ✅ |
+| `iv_source_call_back` | enum | Call IV source for back: `greeks`, `exearn_fallback`, `exearn_primary`, or `greeks_fallback` | *(empty)* | ✅ |
+| `iv_source_put_front` | enum | Put IV source for front: `greeks`, `exearn_fallback`, `exearn_primary`, or `greeks_fallback` | *(empty)* | ✅ |
+| `iv_source_put_back` | enum | Put IV source for back: `greeks`, `exearn_fallback`, `exearn_primary`, or `greeks_fallback` | *(empty)* | ✅ |
 | `earnings_conflict` | enum | `yes` or `no` | ✅ | ✅ |
 | `earnings_date` | date | Expected earnings report date (YYYY-MM-DD, empty if none) | ✅ | ✅ |
 | `option_volume_today` | integer | Today's total option chain volume (from dxFeed Underlying.optionVolume) | ✅ | ✅ |
@@ -680,7 +727,9 @@ timestamp,symbol,structure,spot_price,front_dte,back_dte,front_expiry,back_expir
 - **Unified Namespace:** ATM uses `strike`, `delta`, `ff` (same columns as double, not separate `atm_*` namespace)
 - **ATM Calendar:** `strike`, `delta`, `ff`, `min_ff` populated; `put_strike`, `put_delta`, `put_ff`, `combined_ff` empty
 - **Double Calendar:** All strike/delta/ff columns populated (`strike`, `put_strike`, `delta`, `put_delta`, `ff`, `put_ff`, `min_ff`, `combined_ff`)
-- **IV Sources:** Typically `greeks` (primary), rare `exearn_fallback` if Greeks unavailable
+- **IV Sources:**
+  - Default mode: `greeks` (primary), `exearn_fallback` (rare)
+  - With `--iv-ex-earn`: `exearn_primary` (primary), `greeks_fallback` (when ex-earn missing)
 - **Earnings Source:** `cache` (instant lookup), `yahoo` (fresh fetch), or `tastytrade` (fallback)
 - **Skip Reason:** Empty for included symbols, reason code for filtered symbols
 - **Unsorted Output:** Rows appear in scan order (not sorted by FF)
@@ -918,14 +967,21 @@ python scripts/ff_tastytrade_scanner.py --tickers SPY --pairs 30-60 --dte-tolera
 - Scanner allows position through (fail-safe behavior)
 - If persistent, check tastytrade API status
 
-#### 5. "Ex-earn IV fallback" warnings in logs
+#### 5. IV source fallback warnings in logs
 
-**Cause:** Greeks IV missing/invalid for a specific leg, using ex-earn IV fallback.
+**Cause:** Primary IV source missing/invalid, using fallback source.
+
+**Default mode warnings:**
+- "Greeks IV missing, using ex-earn fallback" - Greeks IV unavailable, falling back to ex-earn IV
+- CSV shows `iv_source_*` = `exearn_fallback`
+
+**With `--iv-ex-earn` warnings:**
+- "Ex-earn IV missing, using Greeks IV fallback" - Ex-earn IV unavailable, falling back to Greeks IV
+- CSV shows `iv_source_*` = `greeks_fallback`
 
 **Solutions:**
-- This is informational, not an error - scan continues (rare graceful degradation)
-- Scanner uses ex-earn IV as fallback when Greeks IV unavailable
-- Check `atm_iv_source_*` or `iv_source_*` CSV columns to verify source
+- This is informational, not an error - scan continues with graceful degradation
+- Check `iv_source_*` CSV columns to verify which source was used
 
 #### 6. Scanner returns 0 results
 

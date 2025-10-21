@@ -1,0 +1,12 @@
+2025-10-20 18:49:13,392 - scanner - INFO - SCANNER: Earnings pre-filter: 3 → 2 passed (1 filtered)
+2025-10-20 18:49:13,392 - scanner - INFO - SCANNER: Cache hits: 3 | Fresh fetches: 0
+2025-10-20 18:49:13,392 - scanner - INFO - SCANNER: Earnings check completed in 0.0s
+2025-10-20 18:49:13,647 - scanner.earnings - WARNING - SPY: Earnings date unavailable, skipping earnings check
+2025-10-20 18:49:16,984 - scanner.quality - INFO - ASML: FILTER - Liquidity rating 2 < 3
+2025-10-20 18:49:16,985 - scanner - INFO - SCANNER: No results passing filters
+2025-10-20 18:49:16,985 - scanner - INFO - SCANNER: === Scan Summary ===
+2025-10-20 18:49:16,985 - scanner - INFO - SCANNER: Scanned: 2 symbols
+2025-10-20 18:49:16,985 - scanner - INFO - SCANNER: Passed: 0 opportunities
+2025-10-20 18:49:16,985 - scanner - INFO - SCANNER: Skipped: 1 symbols
+2025-10-20 18:49:16,985 - scanner - INFO - SCANNER: Skip breakdown:
+2025-10-20 18:49:16,985 - scanner - INFO - SCANNER:   - volume_too_low: 1

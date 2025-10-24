@@ -9,12 +9,13 @@ This is the **authoritative contract** for downstream consumers. The scanner emi
 | name                | type   | description |
 |---------------------|--------|-------------|
 | symbol              | str    | Underlying ticker |
-| structure           | enum   | `ATM_CAL` or `DBL_CAL` |
+| structure           | enum   | `atm-call` or `double` |
 | front_expiry        | date   | YYYY‑MM‑DD |
 | back_expiry         | date   | YYYY‑MM‑DD |
-| front_iv            | float  | Implied vol of front expiry (annualized) |
-| forward_iv          | float  | Forward IV between front/back (variance decomposition) |
-| ff                  | float  | Forward Factor = (front_iv − forward_iv)/forward_iv |
+| min_ff              | float  | **Primary sort key**: Minimum of call_ff and put_ff (double), same as call_ff (ATM) |
+| call_ff             | float  | Call leg Forward Factor = (call_front_iv − call_fwd_iv)/call_fwd_iv |
+| put_ff              | float  | Put leg Forward Factor (double only, empty for ATM) |
+| avg_ff              | float  | Average of call_ff and put_ff (double only, empty for ATM) |
 | earnings_window_days| int    | Days between now and next earnings if inside window; else 0 |
 | avg_options_volume  | int    | Average daily options volume used for quality filtering |
 

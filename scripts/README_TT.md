@@ -1,6 +1,6 @@
 # FF Scanner v3.0 - Forward Factor Calendar Spread Scanner
 
-**Version**: 3.0
+**Version**: 3.0.1
 **Last Updated**: October 20, 2025
 
 ## Table of Contents
@@ -30,12 +30,17 @@ The FF Scanner is a production-ready CLI tool that scans liquid options to ident
 - Outputs both ATM call calendars and double calendars (±35Δ)
 - Greeks IV primary, X-earn IV rare fallback (graceful degradation)
 
+**v3.0.1 Enhancements (FF Column Clarity):**
+- ✅ **FF Column Renaming**: `ff` → `call_ff` (clearer), `combined_ff` → `avg_ff` (clearer)
+- ✅ **FF Column Reordering**: Primary sort key `min_ff` now appears first in FF columns
+- ✅ **Updated Sorting**: CSV sorted by `min_ff` (largest to smallest) for both structures
+
 **v3.0 Enhancements (CSV Schema Refactor & Professional Logging):**
 - ✅ **CSV Schema Refactor**: Reduced from 40 to 32 columns (20% reduction, unified namespace)
-- ✅ **Streaming CSV Writer**: O(1) memory usage for 1500+ symbol scans (trade-off: unsorted output)
+- ✅ **Memory-Efficient Scanning**: O(1) memory usage for 1500+ symbol scans
 - ✅ **Hierarchical Logging**: Clean terminal output with `[SYMBOL] STATUS: details` format
 - ✅ **Logger Suppression**: Automatic filtering of third-party library noise (yfinance, tastytrade)
-- ✅ **Unified Column Names**: Eliminated `atm_*` namespace (`atm_ff` → `ff`, `call_strike` → `strike`)
+- ✅ **Unified Column Names**: Eliminated `atm_*` namespace (`call_strike` → `strike`)
 
 **v2.1 Enhancements:**
 - ✅ **Fast Earnings Check**: 80-95% runtime reduction with SQLite cache (1000 symbols: 8min → <30s)
@@ -159,16 +164,16 @@ python scripts/ff_tastytrade_scanner.py \
   --tickers SPY QQQ AAPL TSLA NVDA META AMZN GOOGL MSFT AMD \
   --pairs 30-60 30-90 60-90 \
   --min-ff 0.23 \
-  --structure both \
-  --csv-out "$(date +%y%m%d_%H%M)_ff_scan.csv"
+  --structure both
+# Output auto-saves to: ff_scans/{timestamp}_FFSCAN.csv
 
 # OR (option 2: symbols from file)
 python scripts/ff_tastytrade_scanner.py \
   data/watchlist.txt \
   --pairs 30-60 30-90 60-90 \
   --min-ff 0.23 \
-  --structure both \
-  --csv-out "$(date +%y%m%d_%H%M)_ff_scan.csv"
+  --structure both
+# Output auto-saves to: ff_scans/{timestamp}_FFSCAN.csv
 ```
 
 **Expected output:** 3-5 high-quality opportunities sorted by Forward Factor (highest first).
@@ -176,6 +181,8 @@ python scripts/ff_tastytrade_scanner.py \
 ---
 
 ## Basic Usage
+
+> **Note on CSV output:** If you don't specify `--csv-out`, results are automatically saved to `ff_scans/{timestamp}_FFSCAN.csv` where `{timestamp}` is formatted as `YYMMDD_HHMM`. The `ff_scans/` directory is created automatically if it doesn't exist.
 
 ### Example 1: Simple ATM Calendar Scan
 
@@ -270,7 +277,7 @@ python scripts/ff_tastytrade_scanner.py \
 |------|------|---------|-------------|
 | `input_file` | positional | *(optional)* | Path to text file containing symbols (one per line). If provided, `--tickers` is not required. Example: `symbols.txt` |
 | `--tickers` | list | *(required)* | List of ticker symbols (space or comma-separated). Not required if `input_file` is provided. Example: `SPY QQQ AAPL` |
-| `--pairs` | list | **required** | DTE pairs as `front-back`. Example: `30-60 30-90 60-90` |
+| `--pairs` | list | `14-30 30-60 30-90 60-90` | DTE pairs as `front-back`. Example: `30-60 30-90 60-90`. Defaults to `14-30 30-60 30-90 60-90`. |
 | `--min-ff` | float | `0.20` | Minimum Forward Factor threshold. Use `0.23` for ~20 trades/month. |
 | `--dte-tolerance` | int | `5` | Max deviation from target DTE in days. |
 | `--timeout` | float | `3.0` | Greeks streaming timeout in seconds. |
@@ -345,7 +352,7 @@ python scripts/ff_tastytrade_scanner.py --tickers SPY QQQ --pairs 30-60 --iv-ex-
 
 | Flag | Type | Default | Description |
 |------|------|---------|-------------|
-| `--csv-out` | string | *(none)* | Write results to CSV file. **Recommended for production.** |
+| `--csv-out` | string | `ff_scans/{timestamp}_FFSCAN.csv` | Write results to CSV file. Auto-generates timestamped filename if not specified. |
 | `--json-out` | string | *(none)* | Write results to JSON file. |
 | `--quiet` | flag | `False` | Suppress per-symbol output, show only summary and errors. |
 | `--verbose` | flag | `False` | Show ALL symbols (pass, filter, skip, error). |
@@ -502,19 +509,20 @@ python scripts/ff_tastytrade_scanner.py --tickers SPY --pairs 60-90 --structure 
 python scripts/ff_tastytrade_scanner.py --tickers SPY --pairs 60-90 --structure double --delta-tolerance 0.08
 ```
 
-**Forward Factor Calculation (v2.2):**
+**Forward Factor Calculation (v3.0.1):**
 
 **For double calendars:**
+- `min_ff` = min(call_ff, put_ff) - PRIMARY filtering/sorting metric (conservative worst-case)
 - `call_ff` = Forward Factor for call leg (from +35Δ strike IVs)
 - `put_ff` = Forward Factor for put leg (from -35Δ strike IVs)
-- `min_ff` = min(call_ff, put_ff) - PRIMARY filtering metric (conservative worst-case)
-- `combined_ff` = (call_ff + put_ff) / 2 - secondary ranking metric
+- `avg_ff` = (call_ff + put_ff) / 2 - secondary ranking metric
 
 **For ATM calendars:**
-- `atm_ff` = Single Forward Factor using averaged IVs from 50Δ strike - PRIMARY metric
-- Empty: `call_ff`, `put_ff`, `min_ff`, `combined_ff`
+- `min_ff` = Same as call_ff for ATM (PRIMARY metric)
+- `call_ff` = Single Forward Factor using averaged IVs from 50Δ strike
+- Empty: `put_ff`, `avg_ff`
 
-Results are sorted by `atm_ff` (ATM) or `min_ff` (double) descending (highest first).
+Results are sorted by `min_ff` descending (highest first) for both structures.
 
 **Structure Types in CSV:**
 
@@ -586,7 +594,7 @@ For a 30-60 DTE calendar spread, the scanner will report **three different FF va
 - If scanning with `--structure both`, you'll see the same ticker appear **three times** in results with different FFs
 - The **−35Δ put calendar will often rank highest** due to equity volatility skew
 - This doesn't mean it's a "better" trade - it's a **different** trade with different strikes and different skew exposure
-- Use `combined_ff` for sorting, but understand that higher FF on a put calendar reflects **both term structure AND skew**
+- Results are sorted by `min_ff` (for doubles: minimum of call_ff and put_ff), but understand that higher FF on a put calendar reflects **both term structure AND skew**
 
 **How the Scanner Implements This:**
 
@@ -660,7 +668,7 @@ python scripts/ff_tastytrade_scanner.py \
 
 ### 32-Column Schema (v3.0)
 
-**IMPORTANT: CSV output is now unsorted** (streaming writer for memory efficiency). Sort post-scan if needed: `df.sort_values("ff", ascending=False)`
+**IMPORTANT: CSV output is sorted by `min_ff`** (largest to smallest). Rows are sorted in-memory before writing to CSV.
 
 The scanner outputs a unified CSV schema that supports both ATM and double calendar structures. Empty columns are left blank (not "N/A" or "null").
 
@@ -684,10 +692,10 @@ The scanner outputs a unified CSV schema that supports both ATM and double calen
 | `put_strike` | float | Put strike (-35Δ for double, empty for ATM) | *(empty)* | ✅ |
 | `delta` | float | Call delta (0.50 for ATM, 0.35 for double) | ✅ | ✅ |
 | `put_delta` | float | Put delta (empty for ATM, -0.35 for double) | *(empty)* | ✅ |
-| `ff` | float | Forward factor for call leg (or single FF for ATM) - PRIMARY metric | ✅ | ✅ |
+| `min_ff` | float | **PRIMARY SORT KEY**: Minimum of (call_ff, put_ff) for double; same as call_ff for ATM | ✅ | ✅ |
+| `call_ff` | float | Forward factor for call leg (or single FF for ATM) | ✅ | ✅ |
 | `put_ff` | float | Forward factor for put leg (empty for ATM) | *(empty)* | ✅ |
-| `min_ff` | float | Minimum of (ff, put_ff) for double; same as ff for ATM | ✅ | ✅ |
-| `combined_ff` | float | Average of (ff, put_ff) for double (empty for ATM) | *(empty)* | ✅ |
+| `avg_ff` | float | Average of (call_ff, put_ff) for double (empty for ATM) | *(empty)* | ✅ |
 | `call_front_iv` | float | Call IV at front expiration (decimal: 0.25 = 25%) | ✅ | ✅ |
 | `call_back_iv` | float | Call IV at back expiration | ✅ | ✅ |
 | `call_fwd_iv` | float | Forward IV for call leg (computed) | ✅ | ✅ |
@@ -705,52 +713,60 @@ The scanner outputs a unified CSV schema that supports both ATM and double calen
 | `skip_reason` | string | Reason symbol was filtered (e.g., "earnings_conflict", "volume_too_low", empty if not skipped) | ✅ | ✅ |
 
 **Complete Column Order (32 columns):**
-`timestamp`, `symbol`, `structure`, `spot_price`, `front_dte`, `back_dte`, `front_expiry`, `back_expiry`, `strike`, `put_strike`, `delta`, `put_delta`, `ff`, `put_ff`, `min_ff`, `combined_ff`, `call_front_iv`, `call_back_iv`, `call_fwd_iv`, `put_front_iv`, `put_back_iv`, `put_fwd_iv`, `iv_source_call_front`, `iv_source_call_back`, `iv_source_put_front`, `iv_source_put_back`, `earnings_conflict`, `earnings_date`, `option_volume_today`, `liq_rating`, `earnings_source`, `skip_reason`
+`timestamp`, `symbol`, `structure`, `spot_price`, `front_dte`, `back_dte`, `front_expiry`, `back_expiry`, `strike`, `put_strike`, `delta`, `put_delta`, `min_ff`, `call_ff`, `put_ff`, `avg_ff`, `call_front_iv`, `call_back_iv`, `call_fwd_iv`, `put_front_iv`, `put_back_iv`, `put_fwd_iv`, `iv_source_call_front`, `iv_source_call_back`, `iv_source_put_front`, `iv_source_put_back`, `earnings_conflict`, `earnings_date`, `option_volume_today`, `liq_rating`, `earnings_source`, `skip_reason`
 
 ### Example CSV Output (v3.0)
 
 **ATM Call Calendar:**
 
 ```csv
-timestamp,symbol,structure,spot_price,front_dte,back_dte,front_expiry,back_expiry,strike,put_strike,delta,put_delta,ff,put_ff,min_ff,combined_ff,call_front_iv,call_back_iv,call_fwd_iv,put_front_iv,put_back_iv,put_fwd_iv,iv_source_call_front,iv_source_call_back,iv_source_put_front,iv_source_put_back,earnings_conflict,earnings_date,option_volume_today,liq_rating,earnings_source,skip_reason
-2025-10-19T14:30:00+00:00,SPY,atm-call,580.50,30,60,2025-11-18,2025-12-18,580.00,,0.498,,0.166,,0.166,,0.185,0.172,0.159,0.185,0.172,0.159,greeks,greeks,greeks,greeks,no,,117691,4,cache,
+timestamp,symbol,structure,spot_price,front_dte,back_dte,front_expiry,back_expiry,strike,put_strike,delta,put_delta,min_ff,call_ff,put_ff,avg_ff,call_front_iv,call_back_iv,call_fwd_iv,put_front_iv,put_back_iv,put_fwd_iv,iv_source_call_front,iv_source_call_back,iv_source_put_front,iv_source_put_back,earnings_conflict,earnings_date,option_volume_today,liq_rating,earnings_source,skip_reason
+2025-10-19T14:30:00+00:00,SPY,atm-call,580.50,30,60,2025-11-18,2025-12-18,580.00,,0.498,,0.166,0.166,,,0.185,0.172,0.159,0.185,0.172,0.159,greeks,greeks,greeks,greeks,no,,117691,4,cache,
 ```
 
 **Double Calendar:**
 
 ```csv
-timestamp,symbol,structure,spot_price,front_dte,back_dte,front_expiry,back_expiry,strike,put_strike,delta,put_delta,ff,put_ff,min_ff,combined_ff,call_front_iv,call_back_iv,call_fwd_iv,put_front_iv,put_back_iv,put_fwd_iv,iv_source_call_front,iv_source_call_back,iv_source_put_front,iv_source_put_back,earnings_conflict,earnings_date,option_volume_today,liq_rating,earnings_source,skip_reason
-2025-10-19T14:30:00+00:00,SPY,double,580.50,30,60,2025-11-18,2025-12-18,595.00,565.00,0.3498,-0.3512,0.177,0.168,0.168,0.172,0.192,0.175,0.164,0.188,0.173,0.161,greeks,greeks,greeks,greeks,no,,117691,4,yahoo,
+timestamp,symbol,structure,spot_price,front_dte,back_dte,front_expiry,back_expiry,strike,put_strike,delta,put_delta,min_ff,call_ff,put_ff,avg_ff,call_front_iv,call_back_iv,call_fwd_iv,put_front_iv,put_back_iv,put_fwd_iv,iv_source_call_front,iv_source_call_back,iv_source_put_front,iv_source_put_back,earnings_conflict,earnings_date,option_volume_today,liq_rating,earnings_source,skip_reason
+2025-10-19T14:30:00+00:00,SPY,double,580.50,30,60,2025-11-18,2025-12-18,595.00,565.00,0.3498,-0.3512,0.168,0.177,0.168,0.172,0.192,0.175,0.164,0.188,0.173,0.161,greeks,greeks,greeks,greeks,no,,117691,4,yahoo,
 ```
 
-**Key Differences (v3.0):**
-- **Unified Namespace:** ATM uses `strike`, `delta`, `ff` (same columns as double, not separate `atm_*` namespace)
-- **ATM Calendar:** `strike`, `delta`, `ff`, `min_ff` populated; `put_strike`, `put_delta`, `put_ff`, `combined_ff` empty
-- **Double Calendar:** All strike/delta/ff columns populated (`strike`, `put_strike`, `delta`, `put_delta`, `ff`, `put_ff`, `min_ff`, `combined_ff`)
+**Key Differences (v3.0.1):**
+- **Unified Namespace:** ATM uses `strike`, `delta`, `call_ff` (same columns as double, not separate `atm_*` namespace)
+- **ATM Calendar:** `min_ff`, `call_ff` populated (same value); `put_strike`, `put_delta`, `put_ff`, `avg_ff` empty
+- **Double Calendar:** All strike/delta/ff columns populated (`strike`, `put_strike`, `delta`, `put_delta`, `min_ff`, `call_ff`, `put_ff`, `avg_ff`)
+- **FF Column Order:** `min_ff` first (primary sort key), then `call_ff`, `put_ff`, `avg_ff`
 - **IV Sources:**
   - Default mode: `greeks` (primary), `exearn_fallback` (rare)
   - With `--iv-ex-earn`: `exearn_primary` (primary), `greeks_fallback` (when ex-earn missing)
 - **Earnings Source:** `cache` (instant lookup), `yahoo` (fresh fetch), or `tastytrade` (fallback)
 - **Skip Reason:** Empty for included symbols, reason code for filtered symbols
-- **Unsorted Output:** Rows appear in scan order (not sorted by FF)
+- **Sorted Output:** Rows sorted by `min_ff` descending (largest first)
 
-### Sorting (v3.0)
+### Sorting (v3.0.1)
 
-**IMPORTANT:** CSV output is **unsorted** (written in scan order for streaming efficiency).
+**IMPORTANT:** CSV output is **sorted by min_ff** (largest to smallest), then symbol alphabetically.
 
-**To sort post-scan:**
+**Sorting behavior:**
+- Primary key: `min_ff` (descending, highest first)
+- Secondary key: `symbol` (ascending, alphabetical)
+- Applies to both ATM and double calendar structures
+
+**Post-scan sorting (if needed for custom analysis):**
 ```python
 import pandas as pd
 
 df = pd.read_csv("scan.csv")
 
-# Sort ATM calendars by ff descending
-atm = df[df["structure"] == "atm-call"]
-atm_sorted = atm.sort_values("ff", ascending=False)
+# Already sorted by min_ff (descending), then symbol
+# To apply custom sorting:
 
-# Sort double calendars by min_ff descending
+# Example 1: Sort doubles by avg_ff (trade balance instead of conservative min)
 double = df[df["structure"] == "double"]
-double_sorted = double.sort_values("min_ff", ascending=False)
+double_sorted = double.sort_values("avg_ff", ascending=False)
+
+# Example 2: Filter and re-sort by call_ff only
+df_sorted = df.sort_values("call_ff", ascending=False)
 ```
 
 ### Streaming CSV Writer (v3.0)
@@ -763,8 +779,8 @@ The v3.0 scanner uses a **streaming CSV writer** for memory efficiency:
 - **Immediate writes:** Rows written as soon as scanned (no buffering)
 
 **Trade-off:**
-- CSV output is **unsorted** (appears in scan order, not sorted by FF)
-- Must sort post-scan if ranking needed (see "Sorting" section above)
+- Rows are sorted in-memory by `min_ff` before writing (small memory overhead)
+- For very large scans (5000+ symbols), post-scan sorting may be more memory-efficient
 
 **Performance:**
 - 1000 symbols: ~500MB RAM (vs ~2GB buffered in v2.2)
@@ -773,7 +789,7 @@ The v3.0 scanner uses a **streaming CSV writer** for memory efficiency:
 ### Null Handling
 
 Structure-specific columns are left **empty** (not "N/A" or "null") when not applicable:
-- **ATM calendars:** `put_strike`, `put_delta`, `put_ff`, `combined_ff` are empty
+- **ATM calendars:** `put_strike`, `put_delta`, `put_ff`, `avg_ff` are empty
 - **Double calendars:** No empty columns (all populated)
 
 Note: All other columns (spot_price, DTE, expirations, IV details, earnings, volume, skip_reason) are populated for both structures.
@@ -1297,6 +1313,8 @@ python -m pip uninstall tastytrade
 
 ## Version History
 
+- **v3.0.1** (October 2025): FF column clarity improvements - renamed `ff` → `call_ff`, `combined_ff` → `avg_ff`, reordered FF columns (`min_ff` first as primary sort key), updated sorting to use `min_ff` for both structures
+- **v3.0** (October 2025): CSV schema refactor (40 → 32 columns), streaming CSV writer, unified namespace elimination of `atm_*` columns, hierarchical logging, logger suppression
 - **v2.2** (October 2025): Core calculation corrections - 50Δ ATM strike selection, simplified ATM FF calculation (single atm_ff), double calendar min-gating (min_ff column), hybrid liquidity filtering (liquidity_rating default + optional option_volume), 40-column CSV schema (+10 columns)
 - **v2.1** (October 2025): Fast earnings check with caching (80-95% runtime reduction), multi-source earnings pipeline (Cache → Yahoo → TastyTrade), 31-column CSV schema with earnings_source tracking, CLI cleanup
 - **v2.0** (October 2025): Earnings filtering, liquidity screening, X-earn IV support, double calendar scanning, enhanced CSV output (28 columns)

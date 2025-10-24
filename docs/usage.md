@@ -5,28 +5,34 @@ This page centralizes **how to run the scanner**, common recipes, and the **auth
 ## Quick start
 
 ```bash
-python scripts/ff_tastytrade_scanner.py   --tickers SPY QQQ   --pairs 30-60   --out results/scan.csv
+python scripts/ff_tastytrade_scanner.py   --tickers SPY QQQ   --pairs 30-60
 ```
 
 - `--tickers` accepts space‑separated symbols.
 - `--pairs` specifies front/back day‑count pairs (e.g., `30-60`).
 - Results are written to CSV (see schema in `docs/csv-schema-v3.md`).
+- **CSV output:** If `--csv-out` is not specified, automatically saves to `ff_scans/{timestamp}_FFSCAN.csv` where timestamp is `YYMMDD_HHMM` format.
 
 ## Common recipes
 
 ATM + double calendars on a handful of symbols:
 ```bash
-python scripts/ff_tastytrade_scanner.py   --tickers SPY QQQ AAPL   --pairs 30-60 30-90 60-90   --out results/scan.csv
+python scripts/ff_tastytrade_scanner.py   --tickers SPY QQQ AAPL   --pairs 30-60 30-90 60-90
+```
+
+With custom output path:
+```bash
+python scripts/ff_tastytrade_scanner.py   --tickers SPY QQQ AAPL   --pairs 30-60 30-90 60-90   --csv-out results/scan.csv
 ```
 
 Disable earnings filter (trade through earnings **only if you intend to**):
 ```bash
-python scripts/ff_tastytrade_scanner.py   --tickers AAPL   --pairs 30-90   --allow-earnings   --out results/aapl.csv
+python scripts/ff_tastytrade_scanner.py   --tickers AAPL   --pairs 30-90   --allow-earnings
 ```
 
 Double‑calendars only:
 ```bash
-python scripts/ff_tastytrade_scanner.py   --tickers SPY QQQ   --pairs 60-90   --double-cal-only   --out results/dbl.csv
+python scripts/ff_tastytrade_scanner.py   --tickers SPY QQQ   --pairs 60-90   --structure double
 ```
 
 ## Flag reference (source of truth)

@@ -1145,11 +1145,11 @@ async def scan(session: Session, tickers: List[str], pairs: List[Tuple[int, int]
 
     Returns:
         Tuple of (rows, skip_stats, scanned, passed):
-        - rows: List of dict rows with 40-column unified CSV schema:
+        - rows: List of dict rows with 32-column unified CSV schema:
           - timestamp, symbol, structure
-          - call_ff, put_ff, combined_ff, min_ff (FF metrics)
+          - min_ff, call_ff, put_ff, avg_ff (FF metrics - reordered and renamed)
           - spot_price, front_dte, back_dte, front_expiry, back_expiry
-          - atm_strike (ATM calendars only), call_strike, put_strike, call_delta, put_delta
+          - strike (ATM/call strike), put_strike, delta (ATM/call delta), put_delta
           - call_front_iv, call_back_iv, call_fwd_iv (call leg IVs)
           - put_front_iv, put_back_iv, put_fwd_iv (put leg IVs)
           - earnings_conflict, earnings_date
@@ -1161,10 +1161,9 @@ async def scan(session: Session, tickers: List[str], pairs: List[Tuple[int, int]
           - skip_reason (empty string if not skipped)
           For ATM calendars: call and put IVs are from same strike (may differ slightly)
           For double calendars: call and put IVs are from different strikes (+35Δ vs -35Δ)
-          Sorting: Double calendars by min_ff descending (primary), combined_ff (secondary)
-                   ATM calendars by combined_ff descending
+          Sorting: All rows sorted by min_ff descending (highest first), then symbol alphabetically
           Filtering: Double calendars use min_ff >= threshold (both wings must pass)
-                    ATM calendars use combined_ff >= threshold
+                    ATM calendars use min_ff >= threshold
         - skip_stats: Dict[str, int] mapping skip reasons to counts
         - scanned: int total symbols scanned
         - passed: int opportunities that met FF threshold
@@ -1179,8 +1178,8 @@ async def scan(session: Session, tickers: List[str], pairs: List[Tuple[int, int]
         ... )
         >>> rows[0]['symbol']
         'SPY'
-        >>> rows[0]['combined_ff']
-        0.285  # 28.5% FF ratio
+        >>> rows[0]['call_ff']
+        0.285  # 28.5% call FF ratio
     """
     rows: List[dict] = []
     filtered_rows: List[dict] = []  # For --show-earnings-conflicts
@@ -1629,10 +1628,10 @@ async def scan(session: Session, tickers: List[str], pairs: List[Tuple[int, int]
                         "delta": round(front_call.actual_delta, 4),  # RENAMED from call_delta
                         "put_delta": round(front_put.actual_delta, 4),
                         # FF Metrics (4) - all populated for double structure
-                        "ff": round(ff_call, 6),  # RENAMED from call_ff
-                        "put_ff": round(ff_put, 6),
                         "min_ff": round(min_ff_double, 6),
-                        "combined_ff": round(combined_ff, 6),
+                        "call_ff": round(ff_call, 6),
+                        "put_ff": round(ff_put, 6),
+                        "avg_ff": round(combined_ff, 6),
                         # IV detail (6)
                         "call_front_iv": round(front_call_iv, 6),
                         "call_back_iv": round(back_call_iv, 6),
@@ -1877,11 +1876,11 @@ async def scan(session: Session, tickers: List[str], pairs: List[Tuple[int, int]
                         "put_strike": "",
                         "delta": round(front_choice.actual_delta, 4) if front_choice.actual_delta is not None else "",
                         "put_delta": "",
-                        # FF Metrics (4) - ff and min_ff populated (same value), put_ff and combined_ff empty
-                        "ff": round(atm_ff, 6),
+                        # FF Metrics (4) - min_ff and call_ff populated (same value), put_ff and avg_ff empty
+                        "min_ff": round(atm_ff, 6),  # Same as call_ff for ATM
+                        "call_ff": round(atm_ff, 6),
                         "put_ff": "",
-                        "min_ff": round(atm_ff, 6),  # Same as ff for ATM
-                        "combined_ff": "",
+                        "avg_ff": "",
                         # IV detail (6) - keep for transparency per CLAUDE.md
                         "call_front_iv": round(call_iv_f, 6),
                         "call_back_iv": round(call_iv_b, 6),
@@ -1907,21 +1906,9 @@ async def scan(session: Session, tickers: List[str], pairs: List[Tuple[int, int]
                     skip_stats[SKIP_BELOW_FF_THRESHOLD] += 1
                     greeks_logger.info(f"{sym}: FILTER - Below FF threshold (ff={atm_ff:.3f} < {min_ff:.2f}, {front}-{back} DTE)")
 
-    # Sort results:
-    # - Double calendars: sort by min_ff descending (primary), combined_ff (secondary), symbol (tertiary)
-    # - ATM calendars: sort by ff descending (primary), symbol (secondary)
-    # Separate the two structures for appropriate sorting
-    doubles = [r for r in rows if r["structure"] == "double"]
-    atm_rows = [r for r in rows if r["structure"] == "atm-call"]
-
-    # Sort doubles by min_ff (highest first), then combined_ff, then symbol
-    doubles.sort(key=lambda r: (-r["min_ff"], -r["combined_ff"], r["symbol"]))
-
-    # Sort ATM by ff (highest first), then symbol - v3.0: uses unified 'ff' column
-    atm_rows.sort(key=lambda r: (-r["ff"], r["symbol"]))
-
-    # Combine back: doubles first (higher priority), then ATM
-    rows = doubles + atm_rows
+    # Sort all results by min_ff descending (highest first), then symbol
+    # This applies to both double calendars and ATM calendars
+    rows.sort(key=lambda r: (-r["min_ff"], r["symbol"]))
 
     # Return rows and statistics
     return rows, skip_stats, scanned, passed
@@ -2033,8 +2020,9 @@ Examples:
     ap.add_argument("--tickers", nargs="+", default=None,
                     help="List of underlyings (space or comma-separated). Example: SPY QQQ AAPL. "
                          "Not required if input_file is provided.")
-    ap.add_argument("--pairs", nargs="+", required=True,
-                    help="DTE pairs (front-back). Example: 30-60 30-90 60-90")
+    ap.add_argument("--pairs", nargs="+", default=["14-30", "30-60", "30-90", "60-90"],
+                    help="DTE pairs (front-back). Example: 30-60 30-90 60-90. "
+                         "Default: 14-30 30-60 30-90 60-90")
     ap.add_argument("--min-ff", type=float, default=0.20,
                     help="Minimum FF ratio threshold (default: 0.20). Use 0.23 for ~20 trades/month.")
     ap.add_argument("--dte-tolerance", type=int, default=5,
@@ -2092,6 +2080,13 @@ Examples:
                     help='Write all logs to file with timestamps (enables "tee" functionality).')
 
     args = ap.parse_args()
+
+    # Set default CSV output with timestamp if not provided
+    if not args.csv_out:
+        timestamp = datetime.now().strftime("%y%m%d_%H%M")
+        output_dir = "ff_scans"
+        os.makedirs(output_dir, exist_ok=True)
+        args.csv_out = f"{output_dir}/{timestamp}_FFSCAN.csv"
 
     # Validate ticker input sources
     if args.input_file and args.tickers:
@@ -2228,9 +2223,10 @@ Examples:
     # v3.0 CSV schema (32 columns) - BREAKING CHANGE
     # Breaking changes from v2.2:
     # - REMOVED: 8 atm_* columns (atm_strike, atm_delta, atm_ff, atm_iv_front, atm_iv_back, atm_fwd_iv, atm_iv_source_front, atm_iv_source_back)
-    # - RENAMED: call_strike → strike, call_delta → delta, call_ff → ff
-    # - ATM rows: populate strike, delta, ff, min_ff (leave put_* empty)
-    # - Double rows: populate both strike+put_strike, delta+put_delta, ff+put_ff, min_ff+combined_ff
+    # - RENAMED: call_strike → strike, call_delta → delta, ff → call_ff, combined_ff → avg_ff
+    # - REORDERED: FF columns are now min_ff, call_ff, put_ff, avg_ff (min_ff first for primary sort key visibility)
+    # - ATM rows: populate min_ff, call_ff (same value), leave put_ff and avg_ff empty
+    # - Double rows: populate all four FF columns (min_ff, call_ff, put_ff, avg_ff)
     # - Unified namespace eliminates 16 empty columns per row (20% reduction: 40 → 32)
     cols = [
         # Metadata (4)
@@ -2239,8 +2235,8 @@ Examples:
         "front_dte", "back_dte", "front_expiry", "back_expiry",
         # Strikes/Deltas (4) - UNIFIED NAMESPACE
         "strike", "put_strike", "delta", "put_delta",
-        # FF Metrics (4)
-        "ff", "put_ff", "min_ff", "combined_ff",
+        # FF Metrics (4) - reordered: min_ff, call_ff, put_ff, avg_ff
+        "min_ff", "call_ff", "put_ff", "avg_ff",
         # IV detail (6)
         "call_front_iv", "call_back_iv", "call_fwd_iv",
         "put_front_iv", "put_back_iv", "put_fwd_iv",

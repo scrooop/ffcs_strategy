@@ -1,26 +1,20 @@
-# PRD: reopen issue of IV type
+1. Verify that --show-all-scans is functioning as it's intended to
 
-- add flag --IV-ex-earn that overrides the default greeks-based IV and uses ex-earn IV instead
+2. Move the earnings_date and liq_rating columns immediately after the _______ column
 
+3. What exactly causes a skip to occur due to "both_legs_reqired"? Why would the following two terminal output lines be printed one after another, with one CNC double calendar being skipped for this uninformative reason and then the same symbol returning a passing double calendar??:
+"2025-10-20 21:55:53,433 - scanner.greeks - DEBUG - CNC double 30-60: Skipping - both_legs_required
+2025-10-20 21:55:53,433 - scanner.greeks - INFO - CNC: PASS - Double calendar (min_ff=0.349, 30-90 DTE)"
 
-# PRD improve-csv-output
+4. The output CSV has these columns:
 
-These columns:
-atm_strike	atm_delta	atm_ff	atm_iv_front	atm_iv_back	atm_fwd_iv	atm_iv_source_front	atm_iv_source_back
-are redundant and confusing since there are already these columns as well:
-call_strike	put_strike	call_delta	put_delta	call_ff	put_ff
-"atm" is always *EITHER* a call *OR* a put -- it can't be anything else.
+strike  put_strike  delta put_delta
 
-- Should these columns in the CSV be removed entirely?:
-min_ff	combined_ff
+If "strike" and "delta" mean "call strike" and "call delta", then this is hugely inconsistent and bad. Verify that strike = call strike delta = call delta. If so, rename these columns appropriately.
 
-- These columns are empty:
-call_fwd_iv	put_front_iv	put_back_iv	put_fwd_iv
-
-- Add --liquidity_rating argument so the user can set the minimum liquidity_rating threshold to something other than the default ≥ 3, e.g. "--liquidity_rating 2" sets the threshold to liquidity_rating ≥ 2.
+5.
 
 
-# PRD improve-terminal-output
 
 - print yfinance HTTP Error 404 messages gracefully/minimally
 - implement logging (tee)

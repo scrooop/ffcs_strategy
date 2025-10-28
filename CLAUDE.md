@@ -57,8 +57,9 @@ ffcs_strategy
 ## Minimal ritual (run every time before proposing changes)
 1. **Quick smoke run (small sample)**:
    ```bash
-   python scripts/ff_tastytrade_scanner.py      --tickers SPY QQQ      --pairs 30-60      --out results/sample.csv
+   python scripts/ff_tastytrade_scanner.py      --tickers SPY QQQ      --pairs 30-60
    ```
+   Output will auto-save to `ff_scans/{timestamp}_FFSCAN.csv`
 3. **Validate CSV contract** (headers present, non‑empty rows).
 4. **Run tests** (if present) and **lint/format** (keep diffs minimal).
 5. Write a **short summary** of changes and rationale in the PR body; link to any `docs/` you touched.

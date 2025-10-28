@@ -1149,7 +1149,7 @@ async def scan(session: Session, tickers: List[str], pairs: List[Tuple[int, int]
           - timestamp, symbol, structure
           - min_ff, call_ff, put_ff, avg_ff (FF metrics - reordered and renamed)
           - spot_price, front_dte, back_dte, front_expiry, back_expiry
-          - strike (ATM/call strike), put_strike, delta (ATM/call delta), put_delta
+          - call_strike, put_strike, call_delta, put_delta
           - call_front_iv, call_back_iv, call_fwd_iv (call leg IVs)
           - put_front_iv, put_back_iv, put_fwd_iv (put leg IVs)
           - earnings_conflict, earnings_date
@@ -1622,10 +1622,10 @@ async def scan(session: Session, tickers: List[str], pairs: List[Tuple[int, int]
                         "back_dte": back_choice["dte"],
                         "front_expiry": front_choice["expiration"].isoformat(),
                         "back_expiry": back_choice["expiration"].isoformat(),
-                        # Strikes/Deltas (4) - UNIFIED: both populated for double structure
-                        "strike": f"{front_call.strike:.2f}",  # RENAMED from call_strike
+                        # Strikes/Deltas (4) - both populated for double structure
+                        "call_strike": f"{front_call.strike:.2f}",
                         "put_strike": f"{front_put.strike:.2f}",
-                        "delta": round(front_call.actual_delta, 4),  # RENAMED from call_delta
+                        "call_delta": round(front_call.actual_delta, 4),
                         "put_delta": round(front_put.actual_delta, 4),
                         # FF Metrics (4) - all populated for double structure
                         "min_ff": round(min_ff_double, 6),
@@ -1871,10 +1871,10 @@ async def scan(session: Session, tickers: List[str], pairs: List[Tuple[int, int]
                         "back_dte": back_choice.dte,
                         "front_expiry": front_choice.expiration.isoformat(),
                         "back_expiry": back_choice.expiration.isoformat(),
-                        # Strikes/Deltas (4) - UNIFIED: populated for ATM, put_* empty
-                        "strike": f"{front_choice.strike:.2f}",
+                        # Strikes/Deltas (4) - call_* populated for ATM, put_* empty
+                        "call_strike": f"{front_choice.strike:.2f}",
                         "put_strike": "",
-                        "delta": round(front_choice.actual_delta, 4) if front_choice.actual_delta is not None else "",
+                        "call_delta": round(front_choice.actual_delta, 4) if front_choice.actual_delta is not None else "",
                         "put_delta": "",
                         # FF Metrics (4) - min_ff and call_ff populated (same value), put_ff and avg_ff empty
                         "min_ff": round(atm_ff, 6),  # Same as call_ff for ATM
@@ -2223,18 +2223,18 @@ Examples:
     # v3.0 CSV schema (32 columns) - BREAKING CHANGE
     # Breaking changes from v2.2:
     # - REMOVED: 8 atm_* columns (atm_strike, atm_delta, atm_ff, atm_iv_front, atm_iv_back, atm_fwd_iv, atm_iv_source_front, atm_iv_source_back)
-    # - RENAMED: call_strike → strike, call_delta → delta, ff → call_ff, combined_ff → avg_ff
+    # - RENAMED: ff → call_ff, combined_ff → avg_ff (v3.0.1)
     # - REORDERED: FF columns are now min_ff, call_ff, put_ff, avg_ff (min_ff first for primary sort key visibility)
-    # - ATM rows: populate min_ff, call_ff (same value), leave put_ff and avg_ff empty
-    # - Double rows: populate all four FF columns (min_ff, call_ff, put_ff, avg_ff)
+    # - ATM rows: populate call_strike, call_delta, min_ff, call_ff (same value), leave put_* empty
+    # - Double rows: populate all strike/delta/FF columns
     # - Unified namespace eliminates 16 empty columns per row (20% reduction: 40 → 32)
     cols = [
         # Metadata (4)
         "timestamp", "symbol", "structure", "spot_price",
         # Expirations (4)
         "front_dte", "back_dte", "front_expiry", "back_expiry",
-        # Strikes/Deltas (4) - UNIFIED NAMESPACE
-        "strike", "put_strike", "delta", "put_delta",
+        # Strikes/Deltas (4)
+        "call_strike", "put_strike", "call_delta", "put_delta",
         # FF Metrics (4) - reordered: min_ff, call_ff, put_ff, avg_ff
         "min_ff", "call_ff", "put_ff", "avg_ff",
         # IV detail (6)

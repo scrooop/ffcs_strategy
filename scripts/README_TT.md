@@ -688,9 +688,9 @@ The scanner outputs a unified CSV schema that supports both ATM and double calen
 | `back_dte` | int | Back leg days to expiration | ✅ | ✅ |
 | `front_expiry` | date | Front leg expiration date (YYYY-MM-DD) | ✅ | ✅ |
 | `back_expiry` | date | Back leg expiration date (YYYY-MM-DD) | ✅ | ✅ |
-| `strike` | float | Call strike (50Δ for ATM, +35Δ for double) | ✅ | ✅ |
+| `call_strike` | float | Call strike (50Δ for ATM, +35Δ for double) | ✅ | ✅ |
 | `put_strike` | float | Put strike (-35Δ for double, empty for ATM) | *(empty)* | ✅ |
-| `delta` | float | Call delta (0.50 for ATM, 0.35 for double) | ✅ | ✅ |
+| `call_delta` | float | Call delta (0.50 for ATM, 0.35 for double) | ✅ | ✅ |
 | `put_delta` | float | Put delta (empty for ATM, -0.35 for double) | *(empty)* | ✅ |
 | `min_ff` | float | **PRIMARY SORT KEY**: Minimum of (call_ff, put_ff) for double; same as call_ff for ATM | ✅ | ✅ |
 | `call_ff` | float | Forward factor for call leg (or single FF for ATM) | ✅ | ✅ |
@@ -713,28 +713,28 @@ The scanner outputs a unified CSV schema that supports both ATM and double calen
 | `skip_reason` | string | Reason symbol was filtered (e.g., "earnings_conflict", "volume_too_low", empty if not skipped) | ✅ | ✅ |
 
 **Complete Column Order (32 columns):**
-`timestamp`, `symbol`, `structure`, `spot_price`, `front_dte`, `back_dte`, `front_expiry`, `back_expiry`, `strike`, `put_strike`, `delta`, `put_delta`, `min_ff`, `call_ff`, `put_ff`, `avg_ff`, `call_front_iv`, `call_back_iv`, `call_fwd_iv`, `put_front_iv`, `put_back_iv`, `put_fwd_iv`, `iv_source_call_front`, `iv_source_call_back`, `iv_source_put_front`, `iv_source_put_back`, `earnings_conflict`, `earnings_date`, `option_volume_today`, `liq_rating`, `earnings_source`, `skip_reason`
+`timestamp`, `symbol`, `structure`, `spot_price`, `front_dte`, `back_dte`, `front_expiry`, `back_expiry`, `call_strike`, `put_strike`, `call_delta`, `put_delta`, `min_ff`, `call_ff`, `put_ff`, `avg_ff`, `call_front_iv`, `call_back_iv`, `call_fwd_iv`, `put_front_iv`, `put_back_iv`, `put_fwd_iv`, `iv_source_call_front`, `iv_source_call_back`, `iv_source_put_front`, `iv_source_put_back`, `earnings_conflict`, `earnings_date`, `option_volume_today`, `liq_rating`, `earnings_source`, `skip_reason`
 
 ### Example CSV Output (v3.0)
 
 **ATM Call Calendar:**
 
 ```csv
-timestamp,symbol,structure,spot_price,front_dte,back_dte,front_expiry,back_expiry,strike,put_strike,delta,put_delta,min_ff,call_ff,put_ff,avg_ff,call_front_iv,call_back_iv,call_fwd_iv,put_front_iv,put_back_iv,put_fwd_iv,iv_source_call_front,iv_source_call_back,iv_source_put_front,iv_source_put_back,earnings_conflict,earnings_date,option_volume_today,liq_rating,earnings_source,skip_reason
+timestamp,symbol,structure,spot_price,front_dte,back_dte,front_expiry,back_expiry,call_strike,put_strike,call_delta,put_delta,min_ff,call_ff,put_ff,avg_ff,call_front_iv,call_back_iv,call_fwd_iv,put_front_iv,put_back_iv,put_fwd_iv,iv_source_call_front,iv_source_call_back,iv_source_put_front,iv_source_put_back,earnings_conflict,earnings_date,option_volume_today,liq_rating,earnings_source,skip_reason
 2025-10-19T14:30:00+00:00,SPY,atm-call,580.50,30,60,2025-11-18,2025-12-18,580.00,,0.498,,0.166,0.166,,,0.185,0.172,0.159,0.185,0.172,0.159,greeks,greeks,greeks,greeks,no,,117691,4,cache,
 ```
 
 **Double Calendar:**
 
 ```csv
-timestamp,symbol,structure,spot_price,front_dte,back_dte,front_expiry,back_expiry,strike,put_strike,delta,put_delta,min_ff,call_ff,put_ff,avg_ff,call_front_iv,call_back_iv,call_fwd_iv,put_front_iv,put_back_iv,put_fwd_iv,iv_source_call_front,iv_source_call_back,iv_source_put_front,iv_source_put_back,earnings_conflict,earnings_date,option_volume_today,liq_rating,earnings_source,skip_reason
+timestamp,symbol,structure,spot_price,front_dte,back_dte,front_expiry,back_expiry,call_strike,put_strike,call_delta,put_delta,min_ff,call_ff,put_ff,avg_ff,call_front_iv,call_back_iv,call_fwd_iv,put_front_iv,put_back_iv,put_fwd_iv,iv_source_call_front,iv_source_call_back,iv_source_put_front,iv_source_put_back,earnings_conflict,earnings_date,option_volume_today,liq_rating,earnings_source,skip_reason
 2025-10-19T14:30:00+00:00,SPY,double,580.50,30,60,2025-11-18,2025-12-18,595.00,565.00,0.3498,-0.3512,0.168,0.177,0.168,0.172,0.192,0.175,0.164,0.188,0.173,0.161,greeks,greeks,greeks,greeks,no,,117691,4,yahoo,
 ```
 
 **Key Differences (v3.0.1):**
-- **Unified Namespace:** ATM uses `strike`, `delta`, `call_ff` (same columns as double, not separate `atm_*` namespace)
-- **ATM Calendar:** `min_ff`, `call_ff` populated (same value); `put_strike`, `put_delta`, `put_ff`, `avg_ff` empty
-- **Double Calendar:** All strike/delta/ff columns populated (`strike`, `put_strike`, `delta`, `put_delta`, `min_ff`, `call_ff`, `put_ff`, `avg_ff`)
+- **Explicit Column Names:** `call_strike`, `put_strike`, `call_delta`, `put_delta` (no ambiguous "strike" or "delta")
+- **ATM Calendar:** `call_strike`, `call_delta`, `min_ff`, `call_ff` populated; `put_strike`, `put_delta`, `put_ff`, `avg_ff` empty
+- **Double Calendar:** All strike/delta/ff columns populated (`call_strike`, `put_strike`, `call_delta`, `put_delta`, `min_ff`, `call_ff`, `put_ff`, `avg_ff`)
 - **FF Column Order:** `min_ff` first (primary sort key), then `call_ff`, `put_ff`, `avg_ff`
 - **IV Sources:**
   - Default mode: `greeks` (primary), `exearn_fallback` (rare)
@@ -1076,8 +1076,8 @@ source ~/.zshrc
 
 **Expected Behavior:**
 
-- ATM calendars: `call_strike`, `put_strike`, `call_delta`, `put_delta` are empty
-- Double calendars: `atm_strike` is empty
+- ATM calendars: `put_strike`, `put_delta`, `put_ff`, `avg_ff` are empty
+- Double calendars: No empty columns (all populated)
 
 This is **correct** - the schema is unified for all structures. All IV and FF columns are populated for both structures. Use `structure` column to identify which strike columns are relevant.
 

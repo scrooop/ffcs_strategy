@@ -12,6 +12,10 @@ This is the **authoritative contract** for downstream consumers. The scanner emi
 | structure           | enum   | `atm-call` or `double` |
 | front_expiry        | date   | YYYY‑MM‑DD |
 | back_expiry         | date   | YYYY‑MM‑DD |
+| call_strike         | float  | Call leg strike price (ATM: 50Δ strike, Double: +35Δ strike) |
+| put_strike          | float  | Put leg strike price (double only: -35Δ strike, empty for ATM) |
+| call_delta          | float  | Call leg delta (ATM: ~0.50, Double: ~0.35) |
+| put_delta           | float  | Put leg delta (double only: ~-0.35, empty for ATM) |
 | min_ff              | float  | **Primary sort key**: Minimum of call_ff and put_ff (double), same as call_ff (ATM) |
 | call_ff             | float  | Call leg Forward Factor = (call_front_iv − call_fwd_iv)/call_fwd_iv |
 | put_ff              | float  | Put leg Forward Factor (double only, empty for ATM) |

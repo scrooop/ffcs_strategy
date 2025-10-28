@@ -279,7 +279,7 @@ python scripts/ff_tastytrade_scanner.py \
 | `--tickers` | list | *(required)* | List of ticker symbols (space or comma-separated). Not required if `input_file` is provided. Example: `SPY QQQ AAPL` |
 | `--pairs` | list | `14-30 30-60 30-90 60-90` | DTE pairs as `front-back`. Example: `30-60 30-90 60-90`. Defaults to `14-30 30-60 30-90 60-90`. |
 | `--min-ff` | float | `0.20` | Minimum Forward Factor threshold. Use `0.23` for ~20 trades/month. |
-| `--dte-tolerance` | int | `5` | Max deviation from target DTE in days. |
+| `--dte-tolerance` | int | `10` | Max deviation from target DTE in days. |
 | `--timeout` | float | `3.0` | Greeks streaming timeout in seconds. |
 
 ### Structure Selection

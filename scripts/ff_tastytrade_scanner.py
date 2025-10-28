@@ -1128,7 +1128,7 @@ async def scan(session: Session, tickers: List[str], pairs: List[Tuple[int, int]
         tickers: List of ticker symbols to scan (e.g., ['SPY', 'QQQ', 'AAPL'])
         pairs: List of (front_dte, back_dte) tuples (e.g., [(30, 60), (60, 90)])
         min_ff: Minimum FF ratio threshold (e.g., 0.20 or 0.23)
-        dte_tolerance: Max deviation from target DTE in days (default 5)
+        dte_tolerance: Max deviation from target DTE in days (default 10)
         timeout_s: Greeks streaming timeout in seconds (default 3.0)
         skip_earnings: Filter out positions with earnings conflicts (default True)
         options_volume_threshold: If set, use dxFeed option volume filtering (requires market hours).
@@ -1174,7 +1174,7 @@ async def scan(session: Session, tickers: List[str], pairs: List[Tuple[int, int]
     Example:
         >>> rows = await scan(
         ...     session, ['SPY', 'QQQ'], [(30, 60)],
-        ...     min_ff=0.23, dte_tolerance=5, timeout_s=3.0
+        ...     min_ff=0.23, dte_tolerance=10, timeout_s=3.0
         ... )
         >>> rows[0]['symbol']
         'SPY'
@@ -1383,6 +1383,7 @@ async def scan(session: Session, tickers: List[str], pairs: List[Tuple[int, int]
             for target in required_targets:
                 exp_date = nearest_expiration(chain, target, dte_tolerance)
                 if exp_date is None:
+                    greeks_logger.debug(f"{sym}: No expiration found for {target} DTE (tolerance={dte_tolerance})")
                     continue
                 exp_obj = exp_by_date[exp_date]
 
@@ -1419,6 +1420,12 @@ async def scan(session: Session, tickers: List[str], pairs: List[Tuple[int, int]
             # Build rows for double calendar pairs
             for front, back in pairs:
                 if front not in delta_choices or back not in delta_choices:
+                    missing = []
+                    if front not in delta_choices:
+                        missing.append(f"{front}DTE")
+                    if back not in delta_choices:
+                        missing.append(f"{back}DTE")
+                    greeks_logger.debug(f"{sym}: Skipping {front}-{back} pair - missing expirations: {', '.join(missing)}")
                     continue
 
                 front_choice = delta_choices[front]
@@ -1667,6 +1674,7 @@ async def scan(session: Session, tickers: List[str], pairs: List[Tuple[int, int]
             for target in required_targets:
                 exp_date = nearest_expiration(chain, target, dte_tolerance)
                 if exp_date is None:
+                    greeks_logger.debug(f"{sym}: No expiration found for {target} DTE (tolerance={dte_tolerance})")
                     continue
                 exp_obj = exp_by_date[exp_date]
 
@@ -1799,6 +1807,12 @@ async def scan(session: Session, tickers: List[str], pairs: List[Tuple[int, int]
             # 6) Build rows for pairs
             for front, back in pairs:
                 if front not in choices or back not in choices:
+                    missing = []
+                    if front not in choices:
+                        missing.append(f"{front}DTE")
+                    if back not in choices:
+                        missing.append(f"{back}DTE")
+                    greeks_logger.debug(f"{sym}: Skipping {front}-{back} pair - missing expirations: {', '.join(missing)}")
                     continue
 
                 front_choice = choices[front]
@@ -2025,8 +2039,8 @@ Examples:
                          "Default: 14-30 30-60 30-90 60-90")
     ap.add_argument("--min-ff", type=float, default=0.20,
                     help="Minimum FF ratio threshold (default: 0.20). Use 0.23 for ~20 trades/month.")
-    ap.add_argument("--dte-tolerance", type=int, default=5,
-                    help="Max deviation from target DTE in days (default: 5).")
+    ap.add_argument("--dte-tolerance", type=int, default=10,
+                    help="Max deviation from target DTE in days (default: 10).")
     ap.add_argument("--timeout", type=float, default=3.0,
                     help="Greeks streaming timeout in seconds (default: 3.0).")
 

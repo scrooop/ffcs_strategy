@@ -45,8 +45,13 @@ from tastytrade.utils import today_in_new_york
 
 import yfinance as yf
 import pydantic
+import re
 
 from earnings_cache import EarningsCache
+
+# Rich library for terminal formatting
+from rich.console import Console
+from rich.text import Text
 
 # ---------- Skip Reason Constants ----------
 # Used to track why symbols are skipped during scans
@@ -70,146 +75,166 @@ ATM_DELTA_TARGET = 0.50
 # If no strikes within ±0.10Δ of target, fallback to nearest-spot logic
 ATM_DELTA_TOLERANCE = 0.10
 
-# ---------- Logging Setup ----------
+# ---------- Console Setup (Rich-based formatting) ----------
 
-class SymbolFormatter(logging.Formatter):
+class LogFileWriter:
     """
-    Custom formatter for symbol-based log messages.
+    Log file writer with ANSI code stripping (like EVC tool).
 
-    Formats messages as: [SYMBOL] STATUS: details
-
-    Expected message format: "SYMBOL: message text"
-    If no colon found, returns message as-is.
-
-    Status mapping:
-        DEBUG   -> DEBUG
-        INFO    -> INFO
-        WARNING -> WARN
-        ERROR   -> ERROR
-
-    Example:
-        Input:  logger.info("SPY: Forward factor 0.285")
-        Output: [SPY   ] INFO : Forward factor 0.285
+    Writes to log file with all ANSI color codes stripped for clean text output.
+    Terminal output retains colors, log files get plain text.
     """
 
-    def format(self, record):
-        msg = str(record.msg) % record.args if record.args else str(record.msg)
+    ANSI_PATTERN = re.compile(r"\x1b\[[0-9;]*[a-zA-Z]")
 
-        # Extract symbol from message (format: "SYMBOL: message")
-        if ':' in msg:
-            parts = msg.split(':', 1)
-            symbol = parts[0].strip()
-            message = parts[1].strip()
+    def __init__(self, log_path: str):
+        """Initialize log file writer.
 
-            # Map log level to status keyword
-            status_map = {
-                'DEBUG': 'DEBUG',
-                'INFO': 'INFO',
-                'WARNING': 'WARN',
-                'ERROR': 'ERROR'
-            }
-            status = status_map.get(record.levelname, record.levelname[:5].upper())
+        Args:
+            log_path: Path to log file (truncated on start)
+        """
+        self.file = open(log_path, "w", encoding="utf-8")
+        self.stdout = sys.stdout
 
-            # Format: [SYMBOL] STATUS: message
-            # Pad symbol to 6 chars, status to 5 chars for alignment
-            return f"[{symbol:6}] {status:5}: {message}"
-        else:
-            # No symbol prefix, return as-is
-            return msg
+    def write(self, message: str) -> None:
+        """Write to stdout (with colors) and file (without colors).
+
+        Args:
+            message: Message to write (may contain ANSI codes)
+        """
+        self.stdout.write(message)  # Terminal gets colors
+        clean_message = self.ANSI_PATTERN.sub("", message)  # Strip for file
+        self.file.write(clean_message)
+        self.file.flush()
+
+    def flush(self) -> None:
+        """Flush both stdout and file."""
+        self.stdout.flush()
+        self.file.flush()
 
 
-def setup_logging(mode: str, log_file: Optional[str] = None) -> logging.Logger:
-    """
-    Configure hierarchical logging system for the scanner.
+# Global console instance (force colors even when redirected)
+console = Console(force_terminal=True)
 
-    Creates a logger hierarchy:
-        - scanner (root)
-        - scanner.earnings
-        - scanner.market_data
-        - scanner.greeks
-        - scanner.quality
+
+def status_symbol(status: str) -> Tuple[str, str]:
+    """Get Unicode symbol and color for status type (EVC standard).
 
     Args:
-        mode: Logging mode, one of:
-            - "quiet": Only ERROR messages
-            - "normal": INFO and above (default user mode)
-            - "verbose": INFO and above (same as normal, reserved for future use)
-            - "debug": All messages including DEBUG, with timestamps
-        log_file: Optional file path for logging output (receives ALL log levels)
+        status: Status type - "success", "error", "skip", "info", "warning", "action"
 
     Returns:
-        Root scanner logger instance
+        Tuple of (symbol, style) for Rich formatting
+
+    Examples:
+        >>> status_symbol("success")
+        (' [✓] ', 'bold green')
+        >>> status_symbol("error")
+        (' [✗] ', 'bold red')
+    """
+    status_map = {
+        "success": (" [✓] ", "bold green"),
+        "error": (" [✗] ", "bold red"),
+        "skip": (" [~] ", "dim"),
+        "info": (" [▪] ", "cyan"),
+        "warning": (" [?] ", "bold yellow"),
+        "action": (" [▸] ", "bright_cyan"),
+    }
+    return status_map.get(status, (" [•] ", "white"))
+
+
+def print_status(status: str, message: str, end: str = "\n") -> None:
+    """Print status message with Unicode symbol and color.
+
+    Args:
+        status: Status type (success/error/skip/info/warning/action)
+        message: Message text
+        end: Line ending (default newline)
+
+    Examples:
+        >>> print_status("success", "Earnings pre-filter: 120/150 passed")
+        [✓] Earnings pre-filter: 120/150 passed
+
+        >>> print_status("action", "Fetching earnings calendar...")
+        [▸] Fetching earnings calendar...
+    """
+    symbol, style = status_symbol(status)
+    text = Text()
+    text.append(symbol, style=style)
+    text.append(message, style="white")
+    console.print(text, highlight=False, end=end)
+
+
+def print_inline_status(status: str, message: str) -> bool:
+    """Print inline status (completes the progress counter line).
+
+    Used after progress counter to show result on same line.
+
+    Args:
+        status: Status type (success/error/skip/info/warning)
+        message: Message text
+
+    Returns:
+        True if status was printed, False otherwise
+
+    Examples:
+        >>> console.print("[ 1/46] SPY           ", end="")
+        >>> print_inline_status("success", "Pass - FF 0.285")
+        [ 1/46] SPY            [✓] Pass - FF 0.285
+    """
+    if should_print("info"):
+        symbol, style = status_symbol(status)
+        text = Text()
+        text.append(symbol, style=style)
+        text.append(message, style="white")
+        console.print(text, highlight=False)
+        return True
+    return False
+
+
+# Global verbosity mode (set by setup_output)
+_VERBOSITY_MODE = "normal"
+
+
+def setup_output(mode: str, log_file: Optional[str] = None) -> None:
+    """
+    Configure Rich console output and optional log file with ANSI stripping.
+
+    Args:
+        mode: Output verbosity mode:
+            - "quiet": Only ERROR messages
+            - "normal": Standard output with INFO/WARN/ERROR (default)
+            - "verbose": Show ALL symbols (pass, filter, skip, error)
+            - "debug": Like verbose, with additional debug information
+        log_file: Optional file path for log output (ANSI codes stripped)
 
     Modes:
         quiet:  Minimal output, only errors
-        normal: Clean [SYMBOL] STATUS format, INFO/WARN/ERROR
-        debug:  Full timestamps + logger names, all DEBUG messages
+        normal: Standard output with Unicode status symbols
+        verbose: Show all symbols including skipped/filtered
+        debug:  Verbose + additional debug information
 
     File Logging:
-        - File receives ALL log levels (DEBUG and above) regardless of mode
-        - File output includes timestamps and logger names
+        - File receives ALL output (color codes stripped)
+        - Terminal output respects verbosity mode
         - File is truncated on start (fresh log each run)
-        - Terminal output still respects mode (quiet/normal/verbose/debug)
 
     Side effects:
-        - Clears existing handlers on scanner logger
-        - Suppresses yfinance logger to ERROR level (no HTTP 404 spam)
-        - Suppresses tastytrade, httpx, earnings_cache to WARNING
+        - Sets global _VERBOSITY_MODE for use by print functions
+        - Redirects stdout to LogFileWriter if log_file provided
+        - Suppresses noisy third-party loggers (yfinance, tastytrade, httpx)
     """
-    # Create root scanner logger
-    scanner_logger = logging.getLogger("scanner")
-    scanner_logger.handlers = []  # Clear existing handlers
-    scanner_logger.propagate = False  # Don't propagate to root logger
+    global _VERBOSITY_MODE
+    _VERBOSITY_MODE = mode
 
-    # Set level based on mode
-    # If log_file is provided, set logger to DEBUG so file handler receives all messages
-    # Console handler will still filter based on mode
-    if log_file:
-        scanner_logger.setLevel(logging.DEBUG)  # Logger must accept all levels for file
-    elif mode == "quiet":
-        scanner_logger.setLevel(logging.ERROR)
-    elif mode == "debug":
-        scanner_logger.setLevel(logging.DEBUG)
-    else:  # normal, verbose
-        scanner_logger.setLevel(logging.INFO)
-
-    # Create console handler
-    console = logging.StreamHandler(sys.stderr)
-
-    # Set console handler level based on mode (independent of logger level)
-    if mode == "quiet":
-        console.setLevel(logging.ERROR)
-    elif mode == "debug":
-        console.setLevel(logging.DEBUG)
-    else:  # normal, verbose
-        console.setLevel(logging.INFO)
-
-    # Choose formatter based on mode
-    if mode == "debug":
-        # Debug mode: timestamps and logger names for troubleshooting
-        formatter = logging.Formatter(
-            '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-        )
-    else:
-        # Normal/verbose/quiet: clean symbol-based format
-        formatter = SymbolFormatter()
-
-    console.setFormatter(formatter)
-    scanner_logger.addHandler(console)
-
-    # Add file handler if log_file provided
+    # Redirect stdout to log file with ANSI stripping if requested
     if log_file:
         try:
-            # Truncate file on start (fresh log each run)
-            fh = logging.FileHandler(log_file, mode='w')
-            fh.setLevel(logging.DEBUG)  # File gets ALL levels
-            fh.setFormatter(logging.Formatter(
-                '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-            ))
-            scanner_logger.addHandler(fh)
+            log_writer = LogFileWriter(log_file)
+            sys.stdout = log_writer
+            print_status("info", f"Logging to: {log_file}")
         except (IOError, PermissionError) as e:
-            # Log to console if file can't be created
-            scanner_logger.error(f"SCANNER: Failed to create log file {log_file}: {e}")
+            print_status("error", f"Failed to create log file {log_file}: {e}")
 
     # Suppress noisy third-party loggers
     logging.getLogger("yfinance").setLevel(logging.ERROR)  # No HTTP 404 spam
@@ -217,7 +242,31 @@ def setup_logging(mode: str, log_file: Optional[str] = None) -> logging.Logger:
     logging.getLogger("httpx").setLevel(logging.WARNING)
     logging.getLogger("earnings_cache").setLevel(logging.WARNING)
 
-    return scanner_logger
+
+def should_print(level: str) -> bool:
+    """Check if message should be printed based on verbosity mode.
+
+    Args:
+        level: Message level - "error", "info", "debug"
+
+    Returns:
+        True if message should be printed, False otherwise
+
+    Examples:
+        >>> _VERBOSITY_MODE = "quiet"
+        >>> should_print("error")
+        True
+        >>> should_print("info")
+        False
+    """
+    if _VERBOSITY_MODE == "quiet":
+        return level == "error"
+    elif _VERBOSITY_MODE == "debug":
+        return True  # Show everything
+    elif _VERBOSITY_MODE == "verbose":
+        return True  # Show everything
+    else:  # normal
+        return level in ("error", "info")
 
 
 # ---------- Logger ----------
@@ -1205,16 +1254,29 @@ async def scan(session: Session, tickers: List[str], pairs: List[Tuple[int, int]
     # Fetch market metrics for all symbols upfront (batched)
     market_metrics = fetch_market_metrics(session, tickers)
 
+    # Calculate counter width for aligned progress display
+    total_symbols = len(tickers)
+    counter_width = len(str(total_symbols))
+
     for idx, sym in enumerate(tickers):
         scanned += 1
         # Add small delay between symbols to avoid rate limiting (except for first symbol)
         if idx > 0:
             await asyncio.sleep(0.5)  # 500ms delay between symbols
 
-        # Initialize sub-loggers for this symbol
+        # Display progress counter (EVC-style format)
+        if should_print("info"):
+            counter = f"[{idx + 1:>{counter_width}}/{total_symbols}]"
+            console.print(f"{counter} {sym:<15}")
+
+        # Temporary: Create dummy loggers to prevent NameError during migration
+        # TODO: Remove once all logger calls are replaced
         market_logger = logging.getLogger("scanner.market_data")
         greeks_logger = logging.getLogger("scanner.greeks")
         quality_logger = logging.getLogger("scanner.quality")
+        market_logger.setLevel(logging.CRITICAL)  # Effectively disable
+        greeks_logger.setLevel(logging.CRITICAL)
+        quality_logger.setLevel(logging.CRITICAL)
 
         # 1) Underlying spot - handle futures vs equity
         if is_futures_symbol(sym):
@@ -1222,11 +1284,10 @@ async def scan(session: Session, tickers: List[str], pairs: List[Tuple[int, int]
             spot = get_futures_spot_price(sym)
             if spot is None:
                 skip_stats[SKIP_NO_QUOTE] += 1
-                market_logger.debug(f"{sym}: Skipping - {SKIP_NO_QUOTE}")
                 if verbose:
-                    market_logger.info(f"{sym}: SKIP - No quote available (futures)")
+                    print_inline_status("skip", "SKIP - No quote available (futures)")
                 else:
-                    market_logger.warning(f"{sym}: No quote available, skipping")
+                    print_inline_status("skip", "No quote")
                 continue
         else:
             # For equity, use standard equity market data
@@ -1234,20 +1295,18 @@ async def scan(session: Session, tickers: List[str], pairs: List[Tuple[int, int]
                 md = get_market_data(session, sym, InstrumentType.EQUITY)
                 if md is None or md.last is None:
                     skip_stats[SKIP_NO_QUOTE] += 1
-                    market_logger.debug(f"{sym}: Skipping - {SKIP_NO_QUOTE}")
                     if verbose:
-                        market_logger.info(f"{sym}: SKIP - No quote available")
+                        print_inline_status("skip", "SKIP - No quote available")
                     else:
-                        market_logger.warning(f"{sym}: No quote available, skipping")
+                        print_inline_status("skip", "No quote")
                     continue
                 spot = float(md.last) if md.last is not None else float(md.mark)
             except Exception as e:
                 skip_stats[SKIP_NO_QUOTE] += 1
-                market_logger.debug(f"{sym}: Skipping - {SKIP_NO_QUOTE} (error: {e})")
                 if verbose:
-                    market_logger.info(f"{sym}: ERROR - Market data fetch failed ({e})")
+                    print_inline_status("error", f"ERROR - Market data fetch failed ({e})")
                 else:
-                    market_logger.warning(f"{sym}: Could not get market data - {e}, skipping")
+                    print_inline_status("error", f"Market data error")
                 continue
 
         # 2) Extract earnings data and liquidity rating for this symbol
@@ -2138,18 +2197,18 @@ Examples:
     else:
         mode = "normal"
 
-    # Setup hierarchical logging system (Issue #38, #40)
-    scanner_logger = setup_logging(mode, log_file=args.log_file)
+    # Setup Rich console output and log file (if requested)
+    setup_output(mode, log_file=args.log_file)
 
     # Validate flag values
     if args.delta_tolerance < 0.01 or args.delta_tolerance > 0.10:
-        scanner_logger.error("SCANNER: --delta-tolerance must be between 0.01 and 0.10")
+        print_status("error", "--delta-tolerance must be between 0.01 and 0.10")
         sys.exit(1)
 
     username = os.environ.get("TT_USERNAME", "").strip()
     password = os.environ.get("TT_PASSWORD", "").strip()
     if not username or not password:
-        scanner_logger.error("SCANNER: Set TT_USERNAME and TT_PASSWORD env vars")
+        print_status("error", "Set TT_USERNAME and TT_PASSWORD env vars")
         sys.exit(2)
 
     # Create session
@@ -2195,20 +2254,21 @@ Examples:
 
         # Log results
         elapsed = time.time() - start_time
-        scanner_logger.info(f"SCANNER: Earnings pre-filter: {len(tickers)} → {len(passing_symbols)} passed ({len(filtered_symbols)} filtered)")
-        scanner_logger.info(f"SCANNER: Cache hits: {cache_hits} | Fresh fetches: {fresh_fetches}")
-        scanner_logger.info(f"SCANNER: Earnings check completed in {elapsed:.1f}s")
+        print_status("success", f"Earnings pre-filter: {len(passing_symbols)}/{len(tickers)} passed ({len(filtered_symbols)} filtered)")
+        if should_print("info"):
+            print_status("info", f"Cache hits: {cache_hits} | Fresh fetches: {fresh_fetches}")
+            print_status("info", f"Earnings check completed in {elapsed:.1f}s")
 
         if args.show_earnings_conflicts:
             for symbol, reason in filtered_symbols:
-                scanner_logger.info(f"SCANNER: {symbol}: {reason}")
+                print_status("info", f"{symbol}: {reason}")
 
         # Only process passing symbols
         tickers = passing_symbols
 
         # Early exit if all symbols filtered
         if not tickers:
-            scanner_logger.error("SCANNER: No symbols passed earnings filter. Use --allow-earnings to scan through earnings")
+            print_status("error", "No symbols passed earnings filter. Use --allow-earnings to scan through earnings")
             sys.exit(0)
     else:
         # If --allow-earnings is set, mark all symbols as having earnings filter bypassed
@@ -2264,18 +2324,13 @@ Examples:
     ]
 
     if not rows:
-        scanner_logger.info("SCANNER: No results passing filters")
-    else:
-        # Print CSV to stdout (for piping/redirection)
-        print(",".join(cols))
-        for r in rows:
-            print(",".join(str(r.get(c, "")) for c in cols))
+        print_status("info", "No results passing filters")
 
     # Optional outputs
     if args.json_out and rows:
         with open(args.json_out, "w", encoding="utf-8") as f:
             json.dump(rows, f, indent=2)
-        scanner_logger.info(f"SCANNER: Wrote JSON -> {args.json_out}")
+        print_status("success", f"Wrote JSON: {args.json_out}")
 
     if args.csv_out and rows:
         import csv
@@ -2283,19 +2338,20 @@ Examples:
             w = csv.DictWriter(f, fieldnames=cols)
             w.writeheader()
             w.writerows(rows)
-        scanner_logger.info(f"SCANNER: Wrote CSV -> {args.csv_out}")
+        print_status("success", f"Wrote CSV: {args.csv_out}")
 
     # Print scan summary statistics
     total_skipped = sum(skip_stats.values())
-    scanner_logger.info("SCANNER: === Scan Summary ===")
-    scanner_logger.info(f"SCANNER: Scanned: {scanned} symbols")
-    scanner_logger.info(f"SCANNER: Passed: {passed} opportunities")
-    scanner_logger.info(f"SCANNER: Skipped: {total_skipped} symbols")
-    if total_skipped > 0:
-        scanner_logger.info("SCANNER: Skip breakdown:")
-        for reason, count in skip_stats.items():
-            if count > 0:
-                scanner_logger.info(f"SCANNER:   - {reason}: {count}")
+    if should_print("info"):
+        print_status("info", "=== Scan Summary ===")
+        print_status("info", f"Scanned: {scanned} symbols")
+        print_status("info", f"Passed: {passed} opportunities")
+        print_status("info", f"Skipped: {total_skipped} symbols")
+        if total_skipped > 0:
+            print_status("info", "Skip breakdown:")
+            for reason, count in skip_stats.items():
+                if count > 0:
+                    print_status("info", f"  - {reason}: {count}")
 
 if __name__ == "__main__":
     main()

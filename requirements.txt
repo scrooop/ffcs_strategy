@@ -1,0 +1,7 @@
+# Forward Factor Calendar Spread Scanner Dependencies
+
+# tastytrade API and market data
+tastytrade>=10.0
+
+# Terminal UI and formatting
+rich>=13.0.0

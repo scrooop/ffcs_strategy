@@ -6,15 +6,12 @@
 "2025-10-20 21:55:53,433 - scanner.greeks - DEBUG - CNC double 30-60: Skipping - both_legs_required
 2025-10-20 21:55:53,433 - scanner.greeks - INFO - CNC: PASS - Double calendar (min_ff=0.349, 30-90 DTE)"
 
-4. The output CSV has these columns:
-
-strike  put_strike  delta put_delta
-
-If "strike" and "delta" mean "call strike" and "call delta", then this is hugely inconsistent and bad. Verify that strike = call strike delta = call delta. If so, rename these columns appropriately.
-
-5.
+4. Update --verbose and --debug flags to work properly with the new rich-formatted terminal output. Currently they output raw log messages that don't match the clean rich formatting style.
 
 
+
+
+OTHER:
 
 - print yfinance HTTP Error 404 messages gracefully/minimally
 - implement logging (tee)
